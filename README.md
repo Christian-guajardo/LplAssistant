@@ -44,6 +44,7 @@ incompatible au link avec celui de llama.cpp b3775 (segfault sinon).
 ## Build & run
 
 ```sh
+service postgresql start #lance le postgresql
 xmake --root            # build (LplAssistant + laplace-stt)
 ./build/linux/x86_64/release/LplAssistant                 # REPL (commandes: /mem /forget /quit)
 ./build/linux/x86_64/release/LplAssistant --ask "..."     # question unique
@@ -59,7 +60,19 @@ xmake f --root -m debug # passer en mode debug
 
 - **Multi-satellites** : chaque adresse source (ip:port) a son propre buffer
   d'énoncé — plusieurs personnes peuvent parler à des satellites différents
-  en même temps (traitement séquentiel : un seul LLM en RAM).
+  en même temps (un seul LLM en RAM : les réponses sont générées une à une,
+  mais la réception et le triage ne bloquent jamais).
+- **Pipeline live (3 étages)** : le serveur ne fabrique plus toute la réponse
+  avant de l'envoyer. Il diffuse **au fil de l'eau** — dès la première phrase
+  générée : `LLM → file de phrases → TTS → anneau de trames → envoi cadencé`.
+  Chaque étage tourne dans son thread avec des tampons bornés (contre-pression :
+  le LLM ne prend jamais plus de ~2 s d'avance sur la voix). Résultat : le son
+  démarre en ~1 s au lieu d'attendre 10 s le paragraphe entier.
+- **Interruption / priorité au dernier énoncé** : le triage (STT + routage)
+  tourne **pendant** la génération. Un « Laplace, stop » coupe la réponse en
+  cours (annulation du LLM + `STOP` au satellite). Une **nouvelle question**
+  du même locuteur **écrase** la réponse en cours (barge-in) : Laplace laisse
+  tomber l'ancienne et répond à la nouvelle.
 - **Sessions par locuteur** : chaque énoncé reçoit une empreinte vocale
   (timbre spectral + hauteur de voix, cosinus, seuil
   `LAPLACE_VOICE_THRESHOLD` défaut 0.80). Une voix reconnue garde **son**
@@ -70,13 +83,29 @@ xmake f --root -m debug # passer en mode debug
   phrase pour donner assez de voix) ; répéter 2-3 fois pour affiner. Profils
   dans `voiceprints.tsv`. Ce n'est pas de la biométrie de sécurité : c'est
   fait pour distinguer les personnes d'un foyer.
-- **Mot d'appel** : Laplace ne répond que si l'énoncé commence par
-  « laplace » (vérifié sur la transcription, variantes « la place »/« la
-  passe » acceptées ; sur ESP32 ce sera du TinyML on-device). Sinon :
-  datagramme `NOP`, aucune réponse.
-- **Réponse (vers le satellite émetteur uniquement)** : `TXT:<texte>`, puis
-  la voix synthétisée (PCM16 mono 16 kHz, paquets de 40 ms), puis `AEND`.
-  Seul le satellite qui a entendu la question reçoit — et parle.
+- **Gestion des profils** (à la voix) : « Laplace, **supprime tous les
+  profils** » (ou « réinitialise les profils ») efface tout le registre ;
+  « Laplace, **supprime le profil *prénom*** » n'enlève qu'un profil
+  (insensible à la casse). Laplace confirme de vive voix.
+- **Mot d'appel** : la transcription est **entièrement mise en minuscules**,
+  puis Laplace ne répond que si l'énoncé commence par « laplace » (variantes
+  « la place »/« la passe »/« laplasse » acceptées, car Whisper base les
+  confond ; sur ESP32 ce sera du TinyML on-device). Sinon : aucune réponse.
+- **Réponse (vers le satellite émetteur uniquement)** : un `TXT:<phrase>` par
+  segment au fil de la génération, entremêlé de la voix synthétisée (PCM16
+  mono 16 kHz, paquets de 40 ms cadencés temps réel), puis `AEND` en fin —
+  ou `STOP` si la réponse est coupée. Seul le satellite qui a entendu la
+  question reçoit — et parle.
+- **Full-duplex (écoute + parole simultanées)** : le satellite écoute en
+  permanence, même pendant qu'il joue une réponse. On peut donc l'**interrompre
+  à la voix** : « Laplace, stop » (aussi « arrête », « tais-toi », « chut »,
+  « silence ») → le serveur renvoie `STOP`, le satellite coupe la lecture net.
+- **Anti-écho par le contenu** : quand un satellite joue la réponse, son micro
+  peut la capter. Plutôt qu'une annulation d'écho DSP, le serveur retient ce
+  qu'il vient de dire à chaque satellite : un énoncé reçu dans la fenêtre de
+  lecture dont ≥ 70 % des mots sont dans la dernière réponse est reconnu comme
+  son propre écho et ignoré. Laplace ne se répond donc pas à lui-même, et
+  reste à l'écoute pendant qu'il parle.
 
 ### Synthèse vocale
 
@@ -84,7 +113,9 @@ xmake f --root -m debug # passer en mode debug
 `models/fr_FR-siwis-medium.onnx`, voir `LAPLACE_PIPER_DIR` /
 `LAPLACE_TTS_VOICE`) : voix naturelle. À défaut, repli automatique sur
 **espeak-ng** (robotique). Le moteur utilisé est affiché au premier énoncé
-(`[laplace] voix: ...`).
+(`[laplace] voix: ...`). Le texte est **nettoyé du markdown** avant synthèse
+(puces, `*gras*`, `` `code` ``, liens `[texte](url)`) : la voix ne prononce
+pas les caractères de mise en forme, seulement le contenu.
 
 ### Satellite micro local (`laplace-mic`)
 
@@ -92,9 +123,12 @@ En attendant les ESP32, `laplace-mic` sert de satellite de secours : il capte
 le micro par défaut (PulseAudio ; sous WSL c'est le micro Windows via WSLg),
 détecte la parole par énergie (VAD à hystérésis + 700 ms de *hangover*), et
 streame le PCM16 mono 16 kHz en UDP — paquets de 40 ms puis `END`, exactement
-le protocole cible de l'ESP32. Il affiche la réponse texte, **joue la voix**
-sur le haut-parleur par défaut, puis purge le micro (anti-larsen) et repasse
-en écoute : un seul binaire alterne écoute/parole sur la même socket UDP.
+le protocole cible de l'ESP32. Il affiche la réponse texte et **joue la voix**
+sur le haut-parleur par défaut. **Écoute et parole tournent en parallèle**
+(threads séparés micro / réseau / lecture, une seule socket UDP) : on peut lui
+parler pendant qu'il répond, et « Laplace, stop » (`STOP`) coupe la lecture
+immédiatement. Pendant la lecture les seuils VAD sont relevés (le HP excite le
+micro) et le serveur filtre l'écho par le contenu (voir plus haut).
 
 ```sh
 # Terminal 1 : l'assistant

@@ -81,7 +81,8 @@ static std::string token_to_piece(llama_model* model, llama_token tok) {
 
 std::string Llm::generate(const std::vector<ChatMessage>& history,
                           int max_new_tokens,
-                          const std::function<void(const std::string&)>& on_token) {
+                          const std::function<void(const std::string&)>& on_token,
+                          const std::function<bool()>& should_cancel) {
     const std::string prompt = apply_template(impl->model, history);
 
     std::vector<llama_token> toks(prompt.size() + 16);
@@ -118,6 +119,8 @@ std::string Llm::generate(const std::vector<ChatMessage>& history,
     std::string out;
     llama_token tok;
     for (int i = 0; i < max_new_tokens; ++i) {
+        // Barge-in : une nouvelle demande (ou un « stop ») annule ce tour.
+        if (should_cancel && should_cancel()) break;
         tok = llama_sampler_sample(impl->smpl, impl->ctx, -1);
         if (llama_token_is_eog(impl->model, tok)) break;
         std::string piece = token_to_piece(impl->model, tok);

@@ -20,9 +20,12 @@ public:
 
     // Génère la réponse assistant pour l'historique donné.
     // on_token est appelé pour chaque morceau de texte produit (streaming).
+    // should_cancel (optionnel) est consulté avant chaque token : s'il renvoie
+    // true, la génération s'arrête et le texte partiel est retourné (barge-in).
     std::string generate(const std::vector<ChatMessage>& history,
                          int max_new_tokens,
-                         const std::function<void(const std::string&)>& on_token);
+                         const std::function<void(const std::string&)>& on_token,
+                         const std::function<bool()>& should_cancel = nullptr);
 
 private:
     struct Impl;

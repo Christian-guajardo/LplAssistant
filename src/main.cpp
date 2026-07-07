@@ -8,13 +8,17 @@
 #include "voiceprint.h"
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <array>
 #include <stdexcept>
@@ -119,6 +123,51 @@ int main(int argc, char** argv) {
             float voice_threshold = 0.80f;
             if (const char* t = std::getenv("LAPLACE_VOICE_THRESHOLD"))
                 voice_threshold = (float)std::atof(t);
+
+            // Anti-écho : quand un satellite joue la réponse, son micro peut
+            // capter la voix de Laplace. Pas d'annulation d'écho DSP ni de
+            // seuil acoustique (l'empreinte maison ne sépare pas assez sa voix
+            // TTS d'une voix humaine) : Laplace sait CE qu'il vient de dire à
+            // chaque satellite — si un énoncé arrive pendant la fenêtre de
+            // lecture et que ses mots sont presque tous dans ce qu'il vient de
+            // prononcer, c'est son propre écho, il l'ignore. On peut donc lui
+            // parler pendant qu'il parle (barge-in). `on_spoken` alimente cette
+            // fenêtre segment par segment, depuis le thread de génération ;
+            // `route` la lit depuis le thread de triage -> un mutex.
+            struct LastReply {
+                std::vector<std::string>              words;
+                std::chrono::steady_clock::time_point until{};
+            };
+            std::map<std::string, LastReply> last_reply; // par satellite
+            std::mutex                       reply_mtx;
+            auto words_of = [](const std::string& s) {
+                std::vector<std::string> w;
+                std::string cur;
+                for (char c : s) {
+                    if (std::isalnum((unsigned char)c))
+                        cur += (char)std::tolower((unsigned char)c);
+                    else if (!cur.empty()) { w.push_back(cur); cur.clear(); }
+                }
+                if (!cur.empty()) w.push_back(cur);
+                return w;
+            };
+            auto is_echo = [&](const std::string& peer,
+                               const std::string& text) {
+                std::lock_guard<std::mutex> lk(reply_mtx);
+                auto it = last_reply.find(peer);
+                if (it == last_reply.end() ||
+                    std::chrono::steady_clock::now() > it->second.until)
+                    return false;
+                std::vector<std::string> w = words_of(text);
+                if (w.size() < 3) return false;
+                size_t hit = 0;
+                for (const auto& x : w)
+                    if (std::find(it->second.words.begin(),
+                                  it->second.words.end(), x) !=
+                        it->second.words.end())
+                        ++hit;
+                return hit * 10 >= w.size() * 7; // >= 70 % de mots communs
+            };
             std::map<std::string, Agent> agents;
             auto agent_for = [&](const std::string& key) -> Agent& {
                 auto it = agents.find(key);
@@ -129,65 +178,165 @@ int main(int argc, char** argv) {
                                    cfg.max_new_tokens)).first;
                 return it->second;
             };
+            auto contains = [](const std::string& s, const char* w) {
+                return s.find(w) != std::string::npos;
+            };
+            // mot suivant le repère `after` (ex. "profil") dans `s`.
+            auto word_after = [](const std::string& s, const char* after) {
+                auto is_sep = [](char c) {
+                    return std::isspace((unsigned char)c) || c == ',' ||
+                           c == '.' || c == '!' || c == '?' || c == ':' ||
+                           c == ';' || c == '\'';
+                };
+                size_t p = s.find(after);
+                if (p == std::string::npos) return std::string();
+                p += std::strlen(after);
+                while (p < s.size() && !is_sep(s[p])) ++p; // fin du repère
+                while (p < s.size() && is_sep(s[p])) ++p;   // séparateurs
+                size_t e = p;
+                while (e < s.size() && !is_sep(s[e])) ++e;
+                return s.substr(p, e - p);
+            };
 
-            run_udp_audio_server(listen_port,
-                [&](const std::string& wav, const std::vector<int16_t>& pcm,
-                    const std::string& peer) -> std::string {
-                    std::string text = transcribe_via_subprocess(wav);
-                    if (text.empty()) return "";
-                    std::string question = strip_wake_word(text);
-                    if (question.empty()) {
+            UdpHandlers h;
+
+            // STT + minusculisation intégrale du prompt capturé (simplifie tout
+            // le reste : mot d'appel, écho, commandes, calibrage).
+            h.transcribe = [&](const std::string& wav) -> std::string {
+                std::string text;
+                try { text = transcribe_via_subprocess(wav); }
+                catch (const std::exception& e) {
+                    std::fprintf(stderr, "[laplace] STT: %s\n", e.what());
+                    return "";
+                }
+                for (auto& c : text) c = (char)std::tolower((unsigned char)c);
+                return text;
+            };
+
+            // Routage : décide écho / mot d'appel / commandes / réponse.
+            h.route = [&](const std::string& text,
+                          const std::vector<int16_t>& pcm,
+                          const std::string& peer) -> UdpRoute {
+                UdpRoute r; // Ignore par défaut
+                if (text.empty()) return r;
+                if (is_echo(peer, text)) {
+                    std::fprintf(stderr,
+                        "[laplace] %s : mon propre écho, ignoré: %s\n",
+                        peer.c_str(), text.c_str());
+                    return r;
+                }
+                std::string q = strip_wake_word(text); // texte déjà minuscule
+                if (q.empty()) {
+                    std::fprintf(stderr,
+                        "[laplace] %s (ignoré, pas de mot d'appel): %s\n",
+                        peer.c_str(), text.c_str());
+                    return r;
+                }
+
+                // Interruption : "stop / arrête / tais-toi / chut / silence".
+                for (const char* w : {"stop", "arrête", "arrete", "tais-toi",
+                                      "tais toi", "chut", "silence"}) {
+                    if (q.rfind(w, 0) == 0) {
                         std::fprintf(stderr,
-                            "[laplace] %s (ignoré, pas de mot d'appel): %s\n",
-                            peer.c_str(), text.c_str());
-                        return "";
+                            "[laplace] %s : interruption demandée\n",
+                            peer.c_str());
+                        r.action = UdpAction::Stop;
+                        return r;
                     }
+                }
 
-                    std::vector<float> sig = voiceprint(pcm);
+                std::vector<float> sig = voiceprint(pcm);
 
-                    // Calibrage : "calibration <prénom> ..." — détection
-                    // tolérante aux fautes de transcription (1er mot en
-                    // "cali..."), prénom = mot suivant uniquement.
-                    std::string low;
-                    for (char c : question)
-                        low += (char)std::tolower((unsigned char)c);
-                    if (low.rfind("cali", 0) == 0) {
-                        auto is_sep = [](char c) {
-                            return std::isspace((unsigned char)c) ||
-                                   c == ',' || c == '.' || c == '!' ||
-                                   c == '?' || c == ':' || c == ';';
-                        };
-                        size_t i = 0;
-                        while (i < question.size() && !is_sep(question[i])) ++i;
-                        while (i < question.size() && is_sep(question[i])) ++i;
-                        size_t j = i;
-                        while (j < question.size() && !is_sep(question[j])) ++j;
-                        std::string name = question.substr(i, j - i);
-                        if (name.empty())
-                            return "Dis : Laplace, calibration, puis ton prénom.";
-                        if (sig.empty())
-                            return "Énoncé trop court pour le calibrage, "
-                                   "répète en parlant un peu plus longtemps.";
+                // Suppression de profils vocaux. Priorité au « tout effacer ».
+                bool wipe_word = contains(q, "profil") &&
+                    (contains(q, "tous") || contains(q, "tout") ||
+                     contains(q, "toutes") || contains(q, "réinitialise") ||
+                     contains(q, "reinitialise") || contains(q, "reset"));
+                bool del_word = contains(q, "profil") &&
+                    (q.rfind("supprime", 0) == 0 || q.rfind("efface", 0) == 0 ||
+                     q.rfind("oublie", 0) == 0 || q.rfind("retire", 0) == 0);
+                if (wipe_word) {
+                    int n = voices.clear_all();
+                    std::fprintf(stderr,
+                        "[laplace] %d profil(s) vocal(aux) supprimé(s)\n", n);
+                    r.action = UdpAction::Speak;
+                    r.text = n ? "J'ai supprimé les " + std::to_string(n) +
+                                 " profils vocaux."
+                               : "Il n'y avait aucun profil à supprimer.";
+                    return r;
+                }
+                if (del_word) {
+                    std::string name = word_after(q, "profil");
+                    r.action = UdpAction::Speak;
+                    if (name.empty()) {
+                        int n = voices.clear_all();
+                        r.text = "J'ai supprimé les " + std::to_string(n) +
+                                 " profils vocaux.";
+                    } else if (voices.remove(name)) {
+                        r.text = "Profil de " + name + " supprimé.";
+                    } else {
+                        r.text = "Je n'ai pas trouvé de profil au nom de " +
+                                 name + ".";
+                    }
+                    return r;
+                }
+
+                // Calibrage : "calibration <prénom> ..." (1er mot en "cali").
+                if (q.rfind("cali", 0) == 0) {
+                    std::string name = word_after(q, "cali");
+                    r.action = UdpAction::Speak;
+                    if (name.empty())
+                        r.text = "Dis : Laplace, calibration, puis ton prénom.";
+                    else if (sig.empty())
+                        r.text = "Énoncé trop court pour le calibrage, répète "
+                                 "en parlant un peu plus longtemps.";
+                    else {
                         int n = voices.enroll(name, sig);
                         std::fprintf(stderr,
                             "[laplace] profil vocal '%s' : %d échantillon(s)\n",
                             name.c_str(), n);
-                        return "Profil vocal de " + name + " enregistré, "
-                               "échantillon numéro " + std::to_string(n) +
-                               ". Répète pour affiner.";
+                        r.text = "Profil vocal de " + name + " enregistré, "
+                                 "échantillon numéro " + std::to_string(n) +
+                                 ". Répète pour affiner.";
                     }
+                    return r;
+                }
 
-                    std::string who =
-                        sig.empty() ? "" : voices.identify(sig, voice_threshold);
-                    std::string session = who.empty() ? "global" : who;
-                    std::printf("Vous (%s @ %s): %s\nLaplace: ",
-                                who.empty() ? "?" : who.c_str(), peer.c_str(),
-                                question.c_str());
-                    std::string answer = agent_for(session).ask(question, stream);
-                    std::printf("\n");
-                    return answer;
-                },
-                tts_synthesize_16k);
+                std::string who =
+                    sig.empty() ? "" : voices.identify(sig, voice_threshold);
+                r.action   = UdpAction::Reply;
+                r.session  = who.empty() ? "global" : who;
+                r.question = q;
+                std::fprintf(stderr, "[laplace] Vous (%s @ %s): %s\n",
+                             who.empty() ? "?" : who.c_str(), peer.c_str(),
+                             q.c_str());
+                return r;
+            };
+
+            // Génération streaming (annulable), thread de génération.
+            h.generate = [&](const std::string& session,
+                             const std::string& question,
+                             const std::function<void(const std::string&)>& emit,
+                             const std::function<bool()>& should_cancel)
+                -> std::string {
+                return agent_for(session).ask(question, emit, should_cancel);
+            };
+
+            h.synth = tts_synthesize_16k;
+
+            // Alimente la fenêtre anti-écho au fil des phrases prononcées.
+            h.on_spoken = [&](const std::string& peer, const std::string& seg) {
+                std::vector<std::string> w = words_of(seg);
+                std::lock_guard<std::mutex> lk(reply_mtx);
+                LastReply& lr = last_reply[peer];
+                lr.words.insert(lr.words.end(), w.begin(), w.end());
+                if (lr.words.size() > 400)
+                    lr.words.erase(lr.words.begin(), lr.words.end() - 400);
+                lr.until = std::chrono::steady_clock::now() +
+                           std::chrono::seconds(8);
+            };
+
+            run_udp_audio_server(listen_port, h);
             return 0; // (boucle infinie, on n'arrive ici jamais)
         }
         if (!wav_path.empty()) {

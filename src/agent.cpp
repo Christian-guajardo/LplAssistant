@@ -15,7 +15,8 @@ Agent::Agent(Db& db_, Embedder& embedder_, Llm& llm_,
       max_new_tokens(max_new_tokens_) {}
 
 std::string Agent::ask(const std::string& user_input,
-                       const std::function<void(const std::string&)>& on_token) {
+                       const std::function<void(const std::string&)>& on_token,
+                       const std::function<bool()>& should_cancel) {
     // 1. Retrieval : embedding de la question puis recherche composite.
     std::vector<float> qvec = embedder.embed(user_input);
     std::vector<MemoryRow> memories = db.search(qvec, top_k, min_similarity);
@@ -39,7 +40,8 @@ std::string Agent::ask(const std::string& user_input,
     history.push_back({"user", user_input});
 
     // 3. Génération.
-    std::string answer = llm.generate(history, max_new_tokens, on_token);
+    std::string answer = llm.generate(history, max_new_tokens, on_token,
+                                      should_cancel);
 
     // 4. Mémorisation de l'échange (embed sur le tour complet).
     session.push_back({"user", user_input});

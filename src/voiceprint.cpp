@@ -1,4 +1,5 @@
 #include "voiceprint.h"
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -73,6 +74,11 @@ float cosine(const std::vector<float>& a, const std::vector<float>& b) {
 }
 
 } // namespace
+
+float voiceprint_similarity(const std::vector<float>& a,
+                            const std::vector<float>& b) {
+    return cosine(a, b);
+}
 
 std::vector<float> voiceprint(const std::vector<int16_t>& pcm) {
     if ((int)pcm.size() < NFFT * 2) return {};
@@ -188,6 +194,32 @@ int VoiceRegistry::enroll(const std::string& name,
     profiles_.push_back({name, 1, sig});
     save();
     return 1;
+}
+
+int VoiceRegistry::clear_all() {
+    int n = (int)profiles_.size();
+    profiles_.clear();
+    save();
+    return n;
+}
+
+bool VoiceRegistry::remove(const std::string& name) {
+    auto eq_ci = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (std::tolower((unsigned char)a[i]) !=
+                std::tolower((unsigned char)b[i]))
+                return false;
+        return true;
+    };
+    for (auto it = profiles_.begin(); it != profiles_.end(); ++it) {
+        if (eq_ci(it->name, name)) {
+            profiles_.erase(it);
+            save();
+            return true;
+        }
+    }
+    return false;
 }
 
 void VoiceRegistry::save() const {

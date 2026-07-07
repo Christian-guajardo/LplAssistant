@@ -74,9 +74,49 @@ std::vector<int16_t> resample_to_16k(const int16_t* pcm, size_t n_in,
     return out;
 }
 
+// La voix ne doit pas lire les décorations markdown que le LLM produit
+// parfois : puces, gras, code, liens. On garde le texte, on jette la syntaxe.
+std::string strip_markdown(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    bool line_start = true;
+    for (size_t i = 0; i < in.size(); ++i) {
+        char c = in[i];
+        if (line_start) {
+            // en-têtes "#", citations ">", puces "-"/"*", numéros gardés
+            while (i < in.size() && (in[i] == '#' || in[i] == '>' ||
+                                     in[i] == ' ' || in[i] == '\t'))
+                ++i;
+            if (i + 1 < in.size() && (in[i] == '-' || in[i] == '*') &&
+                in[i + 1] == ' ')
+                i += 2;
+            if (i >= in.size()) break;
+            c = in[i];
+            line_start = false;
+        }
+        if (c == '\n') { line_start = true; out += '\n'; continue; }
+        if (c == '*' || c == '_' || c == '`' || c == '~') continue; // emphase/code
+        if (c == '[') { // lien [texte](url) -> texte
+            size_t close = in.find(']', i);
+            if (close != std::string::npos && close + 1 < in.size() &&
+                in[close + 1] == '(') {
+                size_t paren = in.find(')', close);
+                if (paren != std::string::npos) {
+                    out += in.substr(i + 1, close - i - 1);
+                    i = paren;
+                    continue;
+                }
+            }
+        }
+        out += c;
+    }
+    return out;
+}
+
 } // namespace
 
-std::vector<int16_t> tts_synthesize_16k(const std::string& text) {
+std::vector<int16_t> tts_synthesize_16k(const std::string& raw_text) {
+    std::string text = strip_markdown(raw_text);
     if (text.empty()) return {};
 
     char txt_path[] = "/tmp/laplace-tts-XXXXXX";
