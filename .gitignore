@@ -75,3 +75,4 @@ third_party/
 .xmake/
 node_modules/
 out/
+repos_storage/
