@@ -73,3 +73,5 @@ voiceprints.tsv
 models/
 third_party/
 .xmake/
+node_modules/
+out/
