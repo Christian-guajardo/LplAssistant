@@ -27,6 +27,14 @@ public:
                          const std::function<void(const std::string&)>& on_token,
                          const std::function<bool()>& should_cancel = nullptr);
 
+    // Génération contrainte par une grammaire GBNF (sortie JSON garantie pour
+    // la machine à états du deep research). Chaîne de samplers fraîche par
+    // appel : grammaire + température basse, sans pénalité de répétition
+    // (elle casserait la syntaxe JSON).
+    std::string generate_constrained(const std::vector<ChatMessage>& history,
+                                     const std::string& gbnf_grammar,
+                                     int max_new_tokens);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

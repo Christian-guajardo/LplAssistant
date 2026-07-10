@@ -79,6 +79,78 @@ static std::string token_to_piece(llama_model* model, llama_token tok) {
     return n > 0 ? std::string(buf, n) : std::string();
 }
 
+std::string Llm::generate_constrained(const std::vector<ChatMessage>& history,
+                                      const std::string& gbnf_grammar,
+                                      int max_new_tokens) {
+    const std::string prompt = apply_template(impl->model, history);
+
+    std::vector<llama_token> toks(prompt.size() + 16);
+    int n = llama_tokenize(impl->model, prompt.c_str(), (int)prompt.size(),
+                           toks.data(), (int)toks.size(), true, true);
+    if (n < 0) throw std::runtime_error("Llm: échec de tokenisation");
+    toks.resize(n);
+    if (n >= impl->n_ctx - max_new_tokens) {
+        impl->cache.clear();
+        llama_kv_cache_clear(impl->ctx);
+    }
+
+    // Même réutilisation de préfixe KV que generate().
+    size_t common = 0;
+    while (common < impl->cache.size() && common + 1 < (size_t)n &&
+           impl->cache[common] == toks[common])
+        ++common;
+    if (common < impl->cache.size()) {
+        llama_kv_cache_seq_rm(impl->ctx, 0, (llama_pos)common, -1);
+        impl->cache.resize(common);
+    }
+    for (int i = (int)common; i < n; i += impl->n_batch) {
+        int chunk = std::min(impl->n_batch, n - i);
+        llama_batch batch = llama_batch_get_one(toks.data() + i, chunk, i, 0);
+        if (llama_decode(impl->ctx, batch) != 0)
+            throw std::runtime_error("Llm: échec du decode (prompt)");
+    }
+    impl->cache = toks;
+
+    // Chaîne dédiée : grammaire (masque à état) puis greedy. Greedy prend
+    // l'argmax des logits NON masqués — déterministe, exactement ce qu'on veut
+    // pour du JSON contraint, et sans dépendre des champs de probabilité `p`
+    // (que `dist` exigerait via un softmax préalable absent ici).
+    llama_sampler* smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    llama_sampler_chain_add(smpl, llama_sampler_init_grammar(
+        impl->model, gbnf_grammar.c_str(), "root"));
+    llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+
+    // Échantillonnage manuel (apply + accept séparés) plutôt que
+    // llama_sampler_sample() : ce dernier accepte AUSSI le token EOG dans la
+    // grammaire, et en b3775 accepter EOG sur une grammaire dont le JSON vient
+    // d'être complété touche GGML_ASSERT(!stacks.empty()) et abort. On casse la
+    // boucle sur EOG AVANT tout accept, de sorte que la grammaire ne reçoit que
+    // des tokens qu'elle peut réellement consumer.
+    const int n_vocab = llama_n_vocab(impl->model);
+    std::vector<llama_token_data> cand(n_vocab);
+    std::string out;
+    for (int i = 0; i < max_new_tokens; ++i) {
+        const float* logits = llama_get_logits_ith(impl->ctx, -1);
+        for (int t = 0; t < n_vocab; ++t)
+            cand[t] = llama_token_data{t, logits[t], 0.0f};
+        llama_token_data_array cur_p{cand.data(), (size_t)n_vocab, -1, false};
+        llama_sampler_apply(smpl, &cur_p);
+        llama_token tok = cur_p.data[cur_p.selected].id;
+        if (llama_token_is_eog(impl->model, tok)) break;
+        llama_sampler_accept(smpl, tok);
+        out += token_to_piece(impl->model, tok);
+        llama_batch batch = llama_batch_get_one(&tok, 1, (llama_pos)impl->cache.size(), 0);
+        if (llama_decode(impl->ctx, batch) != 0) {
+            llama_sampler_free(smpl);
+            throw std::runtime_error("Llm: échec du decode (génération)");
+        }
+        impl->cache.push_back(tok);
+        if ((int)impl->cache.size() >= impl->n_ctx - 1) break;
+    }
+    llama_sampler_free(smpl);
+    return out;
+}
+
 std::string Llm::generate(const std::vector<ChatMessage>& history,
                           int max_new_tokens,
                           const std::function<void(const std::string&)>& on_token,

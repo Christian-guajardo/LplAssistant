@@ -154,6 +154,49 @@ micro) et le serveur filtre l'écho par le contenu (voir plus haut).
 - **Sampling stabilisé** : pénalité de répétition 1.15 + top-k/min-p
   (indispensable sur un modèle 1.5B).
 
+## Deep research (module `src/research/`)
+
+Recherche profonde autonome : machine à états à actions typées (inspirée de
+jina node-DeepResearch), grammaire GBNF contraignant chaque décision JSON,
+budget de tokens avec « beast mode », checkpoint reprenable et rapport
+markdown sourcé. Voir [master_research_report.md](docs/master_research_report.md)
+et [research_reports/](docs/research_reports/) pour la genèse (15 sources analysées).
+
+```
+plan → [ boucle: search → read(CCR) → reflect(gaps) → answer(évalué) ] → rapport
+```
+
+- **search** : SearXNG (local, sans clé) + providers API-first (Wikipedia,
+  OpenAlex, arXiv, StackExchange, GitHub) — chacun classé ok/empty/error.
+- **read** : lecteur HTML→texte maison (retire script/nav/footer) puis **CCR**
+  (Compress-Cache-Retrieve) : le texte intégral va en cache disque, seule une
+  vue écrémée bornée entre dans le prompt — aucune source n'est tronquée.
+- **reflect** : nomme explicitement les lacunes et pousse des sous-questions.
+- **answer** : réponse évaluée (définitude/attribution/couverture) ; rejetée →
+  la boucle repart avec la critique.
+- **rapport** : rédaction progressive par sections + quality gates URL
+  (HEAD→GET, offline-aware) + diagnostics providers + limites.
+
+```sh
+# LLM via llama-server (cible : slots parallèles + grammaire par requête)
+LAPLACE_RESEARCH_LLM_URL=http://127.0.0.1:8080 \
+LAPLACE_SEARXNG_URL=http://127.0.0.1:8888 \
+./build/linux/x86_64/release/laplace-research "sujet à creuser"
+
+# ou modèle local in-process (grammaire GBNF native) — sans llama-server
+./build/linux/x86_64/release/laplace-research "sujet" --guidance "précisions"
+./build/linux/x86_64/release/laplace-research --resume research_runs/<run>/
+
+# depuis le REPL de l'assistant
+Vous> /research pourquoi mon init Vulkan plante sur Intel Arc
+# ou en une passe
+./build/linux/x86_64/release/LplAssistant --research "sujet"
+```
+
+Variables : `LAPLACE_RESEARCH_LLM_URL`, `LAPLACE_SEARXNG_URL`, `GITHUB_TOKEN`,
+`LAPLACE_RESEARCH_{BUDGET,MAX_STEPS,PROVIDERS,DIR}`. Tests bout-en-bout
+hors-ligne (LLM + web + SearXNG simulés) : `tests/mock_research_stack.py`.
+
 ## Étapes suivantes (rapport, non implémentées)
 
 - Serveurs/clients MCP, boucle ReAct avec outils.

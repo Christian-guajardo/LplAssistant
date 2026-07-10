@@ -3,6 +3,8 @@
 #include "db.h"
 #include "embedder.h"
 #include "llm.h"
+#include "research/engine.h"
+#include "research/llm_client.h"
 #include "tts.h"
 #include "udp_audio.h"
 #include "voiceprint.h"
@@ -81,16 +83,18 @@ static void print_usage(const char* prog) {
         "  --wav <fichier>   transcrit un WAV PCM16 (mono/stéréo, tout taux) et l'utilise comme question\n"
         "  --ask <texte>     pose une question unique puis quitte\n"
         "  --listen [port]   serveur UDP audio pour satellites (défaut 7777)\n"
-        "  (sans option)     REPL interactif. Commandes: /mem /forget /quit\n",
+        "  --research <sujet> lance une recherche profonde et écrit un rapport md\n"
+        "  (sans option)     REPL interactif. Commandes: /mem /forget /research /quit\n",
         prog);
 }
 
 int main(int argc, char** argv) {
-    std::string wav_path, one_shot;
+    std::string wav_path, one_shot, research_topic;
     int listen_port = 0;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
         else if (!std::strcmp(argv[i], "--ask") && i + 1 < argc) one_shot = argv[++i];
+        else if (!std::strcmp(argv[i], "--research") && i + 1 < argc) research_topic = argv[++i];
         else if (!std::strcmp(argv[i], "--listen")) {
             listen_port = (i + 1 < argc && argv[i + 1][0] != '-')
                           ? std::atoi(argv[++i]) : 7777;
@@ -100,6 +104,30 @@ int main(int argc, char** argv) {
     }
 
     Config cfg = Config::from_env();
+
+    // Mode recherche : n'exige ni la base ni l'embedder (le LLM suffit — et
+    // même pas lui si un llama-server est configuré).
+    if (!research_topic.empty()) {
+        try {
+            std::unique_ptr<Llm> local;
+            if (!std::getenv("LAPLACE_RESEARCH_LLM_URL")) {
+                std::fprintf(stderr, "[laplace] chargement du modèle LLM...\n");
+                local = std::make_unique<Llm>(cfg.llm_model, cfg.n_ctx, cfg.n_threads);
+            }
+            auto client = research::make_llm_client(local.get());
+            research::Engine engine(*client, research::ResearchOptions::from_env());
+            std::printf("%s\n", engine.run(research_topic).c_str());
+            // Le rapport est écrit et le chemin imprimé : on sort via _Exit pour
+            // contourner un double-free connu dans le finaliseur statique de
+            // libpqxx-7.10 (frappe tout process liant pqxx, y compris --help).
+            // Les objets locaux (Llm) sont déjà détruits ici ; l'OS libère le reste.
+            std::fflush(nullptr);
+            std::_Exit(0);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[laplace] erreur fatale: %s\n", e.what());
+            return 1;
+        }
+    }
     try {
         std::fprintf(stderr, "[laplace] chargement des modèles...\n");
         Embedder embedder(cfg.embed_model, cfg.n_threads);
@@ -353,13 +381,26 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        std::printf("Laplace prêt. /mem /forget /quit\n");
+        std::printf("Laplace prêt. /mem /forget /research /quit\n");
         std::string line;
         while (true) {
             std::printf("\nVous> ");
             if (!std::getline(std::cin, line)) break;
             if (line.empty()) continue;
             if (line == "/quit" || line == "/exit") break;
+            if (line.rfind("/research ", 0) == 0) {
+                // Recherche profonde synchrone dans le REPL (le mode
+                // fire-and-forget vocal viendra avec l'intégration UDP).
+                try {
+                    research::LocalLlmClient client(llm);
+                    research::Engine engine(client, research::ResearchOptions::from_env());
+                    std::string path = engine.run(line.substr(10));
+                    std::printf("Rapport : %s\n", path.c_str());
+                } catch (const std::exception& e) {
+                    std::printf("Recherche échouée : %s\n", e.what());
+                }
+                continue;
+            }
             if (line == "/mem") {
                 for (const auto& m : db.recent(10))
                     std::printf("[%lld|%s|%s] %.120s\n", m.id, m.category.c_str(),
