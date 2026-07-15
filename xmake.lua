@@ -6,7 +6,6 @@ add_requires("nlohmann_json")
 add_requires("cpp-httplib")
 
 add_requires("llama.cpp", {configs = {shared = false}})
-add_requires("whisper.cpp", {configs = {shared = false}})
 add_requires("whisper.cpp", {configs = {shared = false}, optional = true})
 
 target("LplAssistant")
