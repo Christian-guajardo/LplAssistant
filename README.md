@@ -7,25 +7,42 @@ pour rapprocher).
 
 ## Architecture
 
+Découpage en modules, avec le même contrat dual que LplPlugin : ce qu'une cible
+contrainte doit pouvoir exécuter compile aussi en `-ffreestanding` pour entrer dans
+le `libassistant.a` du noyau, parce que le démon tourne en ring 0 sur le profil
+serveur. La frontière est celle que le projet trace déjà entre `editor/` et
+`procgen/` : **écrivain / lecteur**, hôte / freestanding.
+
+| Module | Cible | Rôle |
+| --- | --- | --- |
+| `infer/` | freestanding | comment le démon calcule (passe avant, quantification entière, échantillonnage contraint) |
+| `mind/` | freestanding | qui il est : persona, mémoire, boucle, budget, `Conversation` |
+| `satellite/` | freestanding | le format de fil d'un nœud de pièce — **trois** consommateurs, dont deux non x86 |
+| `voice/` | freestanding | distinguer les membres d'un foyer à l'oreille |
+| `research/` | hôte | deep research, exposé comme **bibliothèque d'outils** (pas un binaire) |
+| `backend/` | hôte | moteur d'inférence, base vectorielle, audio, protocole d'agents |
+
 ```
-┌────────────── LplAssistant (binaire principal) ──────────────┐
-│  main.cpp   REPL / --ask / --wav / --listen (UDP)            │
-│  udp_audio  serveur UDP multi-satellites (démux par adresse) │
-│  voiceprint empreinte vocale (timbre+pitch, 1 session/pers.) │
-│  tts        synthèse vocale (Piper, espeak-ng en secours)    │
-│  laplace-mic (binaire) satellite micro+haut-parleur local    │
-│  agent      retrieval → prompt → génération → mémorisation   │
-│  llm        llama.cpp + KV cache réutilisé (préfixe commun)  │
-│  embedder   bge-m3 (1024d, multilingue), normalisé L2        │
-│  db         pqxx → PostgreSQL + pgvector (index HNSW)        │
-└──────────────────────────────────────────────────────────────┘
-        │ popen
-        ▼
-  laplace-stt (binaire isolé)  ← whisper.cpp
+apps/laplace     REPL / --ask / --wav / --listen (UDP)
+apps/satellite   nœud micro + haut-parleur local (option `satellite`)
+apps/speech      transcription, dans son propre espace d'adressage (option `stt`)
 ```
 
-Le STT vit dans un binaire séparé : le ggml embarqué de whisper.cpp 1.6.2 est
-incompatible au link avec celui de llama.cpp b3775 (segfault sinon).
+Le STT vit dans un binaire séparé, et `backend/` **exclut** `SpeechInput.cpp` de sa
+bibliothèque : le ggml embarqué de whisper.cpp est incompatible au link avec celui
+de llama.cpp, et les réunir dans un même artefact reproduirait le segfault que la
+séparation évite.
+
+### Conventions
+
+Alignées sur le projet : namespaces `lpl::<module>`, fichiers `PascalCase.hpp`,
+gardes `#ifndef LPL_…_HPP`, acronymes épelés dans les identifiants, méthodes en
+`camelCase`, membres en `_underscore`, aucun `using` pour raccourcir un namespace.
+
+`-fno-rtti -fno-exceptions` sur les modules **freestanding** ; `backend/` garde les
+deux et le documente, comme `bci/` dans LplPlugin — ses dépendances (`pqxx` appelle
+`typeid`, `nlohmann_json` et `cpp-httplib` lèvent) l'exigent. Notre propre code
+n'utilise ni l'un ni l'autre. Warnings `allextra` **+ erreur**, et zéro warning.
 
 ## Modèles (dossier `models/`)
 
@@ -45,7 +62,9 @@ incompatible au link avec celui de llama.cpp b3775 (segfault sinon).
 
 ```sh
 service postgresql start #lance le postgresql
-xmake --root            # build (LplAssistant + laplace-stt)
+xmake --root                      # build (modules + LplAssistant + laplace-stt)
+xmake --root --stt=n              # sans whisper.cpp
+xmake --root --satellite=y        # + le nœud micro local (exige PulseAudio)
 ./build/linux/x86_64/release/LplAssistant                 # REPL (commandes: /mem /forget /quit)
 ./build/linux/x86_64/release/LplAssistant --ask "..."     # question unique
 ./build/linux/x86_64/release/LplAssistant --wav voix.wav  # entrée vocale (WAV PCM16, mono/stéréo, tout taux)
@@ -181,7 +200,7 @@ plan → [ boucle: search → read(CCR) → reflect(gaps) → answer(évalué) ]
 # LLM via llama-server (cible : slots parallèles + grammaire par requête)
 LAPLACE_RESEARCH_LLM_URL=http://127.0.0.1:8080 \
 LAPLACE_SEARXNG_URL=http://127.0.0.1:8888 \
-./build/linux/x86_64/release/laplace-research "sujet à creuser"
+# `research/` est une bibliothèque d'outils appelée par l'IA, plus un binaire
 
 # ou modèle local in-process (grammaire GBNF native) — sans llama-server
 ./build/linux/x86_64/release/laplace-research "sujet" --guidance "précisions"
