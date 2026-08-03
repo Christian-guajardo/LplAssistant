@@ -15,7 +15,7 @@
 #ifndef LPL_LPL_MIND_BUDGET_HPP
 #    define LPL_LPL_MIND_BUDGET_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::mind {
 

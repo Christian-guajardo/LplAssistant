@@ -15,7 +15,7 @@
 #ifndef LPL_VOICE_PARITY_HPP
 #    define LPL_VOICE_PARITY_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::voice {
 

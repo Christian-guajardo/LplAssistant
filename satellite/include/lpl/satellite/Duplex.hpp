@@ -19,7 +19,7 @@
 #ifndef LPL_SATELLITE_DUPLEX_HPP
 #    define LPL_SATELLITE_DUPLEX_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::satellite {
 

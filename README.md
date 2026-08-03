@@ -52,6 +52,29 @@ n'utilise ni l'un ni l'autre. Warnings `allextra` **+ erreur**, et zéro warning
 | Embeddings | bge-m3-q4_k_m.gguf | ~420 Mo |
 | STT | ggml-base.bin (whisper base) | ~142 Mo |
 
+## Build autonome
+
+Ce dépôt se construit et se teste **seul**, sans LplPlugin ni LplKernel — comme
+LplPlugin se construit sans LplKernel. Le socle (Fixed32, CORDIC, ombrelles
+`lpl::pmr`) est une amélioration **détectée**, jamais une exigence :
+
+```sh
+xmake f --root --foundation=auto   # défaut : utilise LplPlugin s'il est là
+xmake f --root --foundation=n      # force le build autonome, hôte uniquement
+xmake f --root --foundation=y      # échoue si le socle est absent (pour la CI)
+```
+
+| Mode | Ce qui est disponible |
+| --- | --- |
+| socle présent (`LPL_HAS_FOUNDATION`) | contrat de déterminisme, compilation `-ffreestanding` possible pour le ring 0 |
+| autonome | hôte uniquement — **Fixed32 n'est pas émulé** |
+
+`include/lpl/Foundation.hpp` est le seul endroit qui connaît la différence : il expose
+les alias primitifs en mode autonome, et n'offre **aucun substitut** à la virgule
+fixe. Une fausse Fixed32 laisserait un build autonome revendiquer une parité qu'il ne
+peut pas avoir, et la première personne à y croire déboguerait une divergence
+qu'aucun test ne peut reproduire.
+
 ## Prérequis
 
 - PostgreSQL démarré (`service postgresql start` sous WSL) avec la base/rôle
@@ -62,13 +85,13 @@ n'utilise ni l'un ni l'autre. Warnings `allextra` **+ erreur**, et zéro warning
 
 ```sh
 service postgresql start #lance le postgresql
-xmake --root                      # build (modules + LplAssistant + laplace-stt)
+xmake --root                      # build (modules + LplAssistant + lpl-stt)
 xmake --root --stt=n              # sans whisper.cpp
 xmake --root --satellite=y        # + le nœud micro local (exige PulseAudio)
-./build/linux/x86_64/release/LplAssistant                 # REPL (commandes: /mem /forget /quit)
-./build/linux/x86_64/release/LplAssistant --ask "..."     # question unique
-./build/linux/x86_64/release/LplAssistant --wav voix.wav  # entrée vocale (WAV PCM16, mono/stéréo, tout taux)
-./build/linux/x86_64/release/LplAssistant --listen 7777   # serveur UDP audio (satellites)
+./build/linux/x86_64/release/lpl-assistant                 # REPL (commandes: /mem /forget /quit)
+./build/linux/x86_64/release/lpl-assistant --ask "..."     # question unique
+./build/linux/x86_64/release/lpl-assistant --wav voix.wav  # entrée vocale (WAV PCM16, mono/stéréo, tout taux)
+./build/linux/x86_64/release/lpl-assistant --listen 7777   # serveur UDP audio (satellites)
 xmake f --root -m debug # passer en mode debug
 ```
 
@@ -136,9 +159,9 @@ xmake f --root -m debug # passer en mode debug
 (puces, `*gras*`, `` `code` ``, liens `[texte](url)`) : la voix ne prononce
 pas les caractères de mise en forme, seulement le contenu.
 
-### Satellite micro local (`laplace-mic`)
+### Satellite micro local (`lpl-mic`)
 
-En attendant les ESP32, `laplace-mic` sert de satellite de secours : il capte
+En attendant les ESP32, `lpl-mic` sert de satellite de secours : il capte
 le micro par défaut (PulseAudio ; sous WSL c'est le micro Windows via WSLg),
 détecte la parole par énergie (VAD à hystérésis + 700 ms de *hangover*), et
 streame le PCM16 mono 16 kHz en UDP — paquets de 40 ms puis `END`, exactement
@@ -151,9 +174,9 @@ micro) et le serveur filtre l'écho par le contenu (voir plus haut).
 
 ```sh
 # Terminal 1 : l'assistant
-./build/linux/x86_64/release/LplAssistant --listen 7777
+./build/linux/x86_64/release/lpl-assistant --listen 7777
 # Terminal 2 : le satellite micro (puis dites « Laplace, ... »)
-./build/linux/x86_64/release/laplace-mic --host 127.0.0.1 --port 7777
+./build/linux/x86_64/release/lpl-mic --host 127.0.0.1 --port 7777
 ```
 
 ## Configuration (variables d'environnement)
@@ -209,7 +232,7 @@ LAPLACE_SEARXNG_URL=http://127.0.0.1:8888 \
 # depuis le REPL de l'assistant
 Vous> /research pourquoi mon init Vulkan plante sur Intel Arc
 # ou en une passe
-./build/linux/x86_64/release/LplAssistant --research "sujet"
+./build/linux/x86_64/release/lpl-assistant --research "sujet"
 ```
 
 Variables : `LAPLACE_RESEARCH_LLM_URL`, `LAPLACE_SEARXNG_URL`, `GITHUB_TOKEN`,

@@ -18,7 +18,7 @@
 #ifndef LPL_SATELLITE_PROTOCOL_HPP
 #    define LPL_SATELLITE_PROTOCOL_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::satellite {
 

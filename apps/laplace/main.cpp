@@ -40,7 +40,7 @@
 #include <limits.h>
 
 
-// Le STT tourne dans un binaire séparé (laplace-stt) : le ggml embarqué de
+// Le STT tourne dans un binaire séparé (lpl-stt) : le ggml embarqué de
 // whisper.cpp est incompatible au link avec celui de llama.cpp.
 static std::string transcribe_via_subprocess(const std::string& wav) {
     char self[PATH_MAX];
@@ -51,14 +51,14 @@ static std::string transcribe_via_subprocess(const std::string& wav) {
         std::string s(self);
         dir = s.substr(0, s.find_last_of('/'));
     }
-    std::string cmd = dir + "/laplace-stt '" + wav + "' 2>/dev/null";
+    std::string cmd = dir + "/lpl-stt '" + wav + "' 2>/dev/null";
     FILE* p = popen(cmd.c_str(), "r");
-    if (!p) throw std::runtime_error("impossible de lancer laplace-stt");
+    if (!p) throw std::runtime_error("impossible de lancer lpl-stt");
     std::string out;
     std::array<char, 512> buf;
     while (fgets(buf.data(), buf.size(), p)) out += buf.data();
     if (pclose(p) != 0)
-        throw std::runtime_error("laplace-stt a échoué sur " + wav);
+        throw std::runtime_error("lpl-stt a échoué sur " + wav);
     while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
     return out;
 }

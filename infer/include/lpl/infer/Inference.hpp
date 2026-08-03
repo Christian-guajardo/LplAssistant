@@ -14,7 +14,7 @@
 #ifndef LPL_LPL_INFER_INFERENCE_HPP
 #    define LPL_LPL_INFER_INFERENCE_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::infer {
 

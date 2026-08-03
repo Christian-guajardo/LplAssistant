@@ -16,7 +16,7 @@
 #ifndef LPL_LPL_MIND_MEMORY_HPP
 #    define LPL_LPL_MIND_MEMORY_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::mind {
 

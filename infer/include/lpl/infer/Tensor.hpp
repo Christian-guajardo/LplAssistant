@@ -14,7 +14,7 @@
 #ifndef LPL_LPL_INFER_TENSOR_HPP
 #    define LPL_LPL_INFER_TENSOR_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::infer {
 

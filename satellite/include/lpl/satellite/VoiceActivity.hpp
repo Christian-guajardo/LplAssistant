@@ -17,7 +17,7 @@
 #ifndef LPL_SATELLITE_VOICEACTIVITY_HPP
 #    define LPL_SATELLITE_VOICEACTIVITY_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::satellite {
 

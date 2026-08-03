@@ -41,11 +41,51 @@ set_languages("c++20")
 -- porté sur `exec(query, pqxx::params{...})` plutôt que réduit au silence.
 set_warnings("allextra", "error")
 
--- The foundation modules (Fixed32, CORDIC, the lpl::pmr umbrellas) live in
--- LplPlugin and are shared by all four repositories. Headers only for now; how they
--- LINK is decision 2 of LplKernel/docs/ARCHITECTURE_cible.md.
-add_includedirs("../LplKernel/LplPlugin/core/include")
-add_includedirs("../LplKernel/LplPlugin/math/include")
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Le socle LplPlugin (Fixed32, CORDIC, les ombrelles lpl::pmr) est une AMÉLIORATION
+-- détectée, jamais une exigence. Ce dépôt doit se construire, tourner et être testé
+-- seul — comme LplPlugin se construit sans LplKernel. Même dispositif que le noyau,
+-- qui boote sans le moteur quand le sous-module manque (LPL_PLUGIN_UNAVAILABLE).
+--
+--   présent  -> LPL_HAS_FOUNDATION : contrat de déterminisme accessible, et ces
+--               modules peuvent être compilés -ffreestanding pour le ring 0 ;
+--   absent   -> build AUTONOME, hôte uniquement. Fixed32 n'est pas émulé : une
+--               fausse virgule fixe laisserait un build autonome revendiquer une
+--               parité qu'il ne peut pas avoir.
+-- ─────────────────────────────────────────────────────────────────────────────
+option("foundation")
+    set_default("auto")
+    set_values("auto", "y", "n")
+    set_showmenu(true)
+    set_description("Use the LplPlugin foundation when available (auto|y|n)")
+option_end()
+
+local kFoundationRoot = "../LplKernel/LplPlugin"
+
+local function hasFoundation()
+    local mode = get_config("foundation") or "auto"
+    if mode == "n" then
+        return false
+    end
+    if os.isdir(path.join(kFoundationRoot, "core/include")) then
+        return true
+    end
+    if mode == "y" then
+        raise("--foundation=y was requested but " .. kFoundationRoot .. " is not present")
+    end
+    return false
+end
+
+-- L'ombrelle du dépôt : le seul endroit qui sait laquelle des deux situations on est.
+add_includedirs("include")
+
+if hasFoundation() then
+    add_includedirs(path.join(kFoundationRoot, "core/include"))
+    add_includedirs(path.join(kFoundationRoot, "math/include"))
+    add_defines("LPL_HAS_FOUNDATION")
+else
+    print("[%s] standalone build: LplPlugin foundation absent, host only", "LplAssistant")
+end
 
 add_requires("nlohmann_json")
 add_requires("cpp-httplib")
@@ -86,7 +126,7 @@ includes("infer", "mind", "satellite", "voice", "research", "backend")
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Applications
 -- ─────────────────────────────────────────────────────────────────────────────
-target("LplAssistant")
+target("lpl-assistant")
     set_kind("binary")
     set_group("apps")
     add_deps("lpl-infer", "lpl-mind", "lpl-voice", "lpl-research", "lpl-assistant-backend")
@@ -102,7 +142,7 @@ target_end()
 -- recherche documentaire.
 
 if has_config("stt") then
-    target("laplace-stt")
+    target("lpl-stt")
         set_kind("binary")
         set_group("apps")
         add_files("backend/src/SpeechInput.cpp", "apps/speech/main.cpp")
@@ -113,7 +153,7 @@ if has_config("stt") then
 end
 
 if has_config("satellite") then
-    target("laplace-mic")
+    target("lpl-mic")
         set_kind("binary")
         set_group("apps")
         add_deps("lpl-satellite")

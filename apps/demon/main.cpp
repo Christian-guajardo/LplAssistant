@@ -16,7 +16,7 @@
  * @copyright MIT License
  */
 
-#include <lpl/core/Assert.hpp>
+#include <lpl/Foundation.hpp>
 
 #include <lpl/infer/Inference.hpp>
 #include <lpl/infer/Model.hpp>

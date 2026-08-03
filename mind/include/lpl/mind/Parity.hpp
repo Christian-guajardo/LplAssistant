@@ -14,7 +14,7 @@
 #ifndef LPL_LPL_MIND_PARITY_HPP
 #    define LPL_LPL_MIND_PARITY_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::mind {
 

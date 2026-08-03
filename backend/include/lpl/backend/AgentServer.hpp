@@ -16,7 +16,7 @@
 #ifndef LPL_LPL_BACKEND_AGENTSERVER_HPP
 #    define LPL_LPL_BACKEND_AGENTSERVER_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::backend {
 

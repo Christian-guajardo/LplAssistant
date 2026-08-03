@@ -15,7 +15,7 @@
 #ifndef LPL_LPL_MIND_REACT_HPP
 #    define LPL_LPL_MIND_REACT_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::mind {
 

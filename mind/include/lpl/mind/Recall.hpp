@@ -15,7 +15,7 @@
 #ifndef LPL_LPL_MIND_RECALL_HPP
 #    define LPL_LPL_MIND_RECALL_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::mind {
 

@@ -16,7 +16,7 @@
 #ifndef LPL_SATELLITE_PARITY_HPP
 #    define LPL_SATELLITE_PARITY_HPP
 
-#    include <lpl/core/Types.hpp>
+#    include <lpl/Foundation.hpp>
 
 namespace lpl::satellite {
 
