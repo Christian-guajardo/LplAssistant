@@ -54,24 +54,50 @@ set_warnings("allextra", "error")
 --               parité qu'il ne peut pas avoir.
 -- ─────────────────────────────────────────────────────────────────────────────
 option("foundation")
-    set_default("auto")
-    set_values("auto", "y", "n")
+    set_default("detect")
+    -- ⚠ The values used to be auto|y|n, and that was unusable: xmake COERCES an option
+    -- whose values look boolean, so `--foundation=n` AND `--foundation=auto` were both
+    -- stored as the boolean false — the documented default and the opt-out became the
+    -- same setting. Measured, not guessed: y stored true, n stored false, auto stored
+    -- false — and so was "auto", which xmake also reads as a boolean. Three words it has
+    -- no boolean reading for keep the three settings apart.
+    set_values("detect", "force", "off")
     set_showmenu(true)
-    set_description("Use the LplPlugin foundation when available (auto|y|n)")
+    set_description("Use the LplPlugin foundation when available (detect|force|off)")
 option_end()
 
 local kFoundationRoot = "../LplKernel/LplPlugin"
 
 local function hasFoundation()
-    local mode = get_config("foundation") or "auto"
-    if mode == "n" then
+    -- Booleans are still handled, because a configuration stored by an older checkout
+    -- carries them: true reads as force, false reads as off. Without that a stale
+    -- .xmake/ would flip a build to standalone with no message saying why.
+    local mode = get_config("foundation")
+    if mode == nil then
+        mode = "detect"
+    elseif mode == true then
+        mode = "force"
+    elseif mode == false then
+        -- A stored boolean can only come from an older checkout, where it meant either
+        -- "auto" or "n" and there is no way left to tell which. Read as DETECT, because
+        -- the failure modes are not symmetric: detecting a sibling that is there costs
+        -- nothing, while silently skipping one makes every gate target vanish.
+        mode = "detect"
+    end
+    if mode == "off" then
         return false
     end
-    if os.isdir(path.join(kFoundationRoot, "core/include")) then
+    -- Both are checked because both are USED: core/math carry the determinism
+    -- contract, and agent/ carries the one decision seam the hosted demon and the
+    -- ring-0 one share. Detecting only core/ and then including agent/ would fail at
+    -- compile time on a checkout that has one and not the other, which is a worse
+    -- error than an honest standalone build.
+    if os.isdir(path.join(kFoundationRoot, "core/include")) and
+       os.isdir(path.join(kFoundationRoot, "agent/include")) then
         return true
     end
-    if mode == "y" then
-        raise("--foundation=y was requested but " .. kFoundationRoot .. " is not present")
+    if mode == "force" then
+        raise("--foundation=force was requested but " .. kFoundationRoot .. " is not present")
     end
     return false
 end
@@ -79,9 +105,16 @@ end
 -- L'ombrelle du dépôt : le seul endroit qui sait laquelle des deux situations on est.
 add_includedirs("include")
 
-if hasFoundation() then
+local kHasFoundation = hasFoundation()
+
+if kHasFoundation then
     add_includedirs(path.join(kFoundationRoot, "core/include"))
     add_includedirs(path.join(kFoundationRoot, "math/include"))
+    add_includedirs(path.join(kFoundationRoot, "memory/include"))
+    -- agent/, for its headers only and never its library: lpl/agent/Decision.hpp is
+    -- self-contained (it includes core/Types.hpp and nothing else) and declares pure
+    -- interfaces, so consuming it costs an include path and no link.
+    add_includedirs(path.join(kFoundationRoot, "agent/include"))
     add_defines("LPL_HAS_FOUNDATION")
 else
     print("[%s] standalone build: LplPlugin foundation absent, host only", "LplAssistant")
@@ -121,6 +154,28 @@ if has_config("stt") then
     add_requires("whisper.cpp", {configs = {shared = false}})
 end
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Le socle, COMPILÉ. Les `add_includedirs` ci-dessus donnent les en-têtes ; trois
+-- unités de traduction de LplPlugin ont en plus du code hors-ligne dont le chemin
+-- freestanding a besoin : CORDIC (les rotations rotatives), l'arène (UNE seule
+-- implémentation dans tout le projet, dont le compte d'octets est foldé par la
+-- gate) et Log (le puits de journalisation).
+--
+-- C'est la décision 2 de LplKernel/docs/ARCHITECTURE_cible.md, tranchée ici de la
+-- façon la moins engageante : une cible locale qui compile trois fichiers, et non
+-- un paquet xmake. En ring 0 la question ne se pose pas — ces objets sont déjà dans
+-- libengine.a, et libassistant.a ne les redéfinit pas.
+if kHasFoundation then
+    target("lpl-foundation")
+        set_kind("static")
+        set_group("modules")
+        add_cxxflags("-fno-rtti", "-fno-exceptions", { force = true })
+        add_files(path.join(kFoundationRoot, "math/src/Cordic.cpp"))
+        add_files(path.join(kFoundationRoot, "memory/src/ArenaAllocator.cpp"))
+        add_files(path.join(kFoundationRoot, "core/src/Log.cpp"))
+    target_end()
+end
+
 includes("infer", "mind", "satellite", "voice", "research", "backend")
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -129,7 +184,7 @@ includes("infer", "mind", "satellite", "voice", "research", "backend")
 target("lpl-assistant")
     set_kind("binary")
     set_group("apps")
-    add_deps("lpl-infer", "lpl-mind", "lpl-voice", "lpl-research", "lpl-assistant-backend")
+    add_deps("lpl-infer", "lpl-mind-hosted", "lpl-voice", "lpl-research", "lpl-assistant-backend")
     add_files("apps/laplace/main.cpp")
     add_packages("llama.cpp", "nlohmann_json", "cpp-httplib")
     add_syslinks("pqxx", "pq", "pthread")
@@ -175,11 +230,18 @@ target_end()
 -- Gates. Le même contrat que partout : ce que l'hôte calcule et ce que le ring 0
 -- calcule doivent folder à l'identique.
 -- ─────────────────────────────────────────────────────────────────────────────
+--
+-- Déclarées seulement quand le socle est là, et c'est le point honnête de
+-- Foundation.hpp : sans Fixed32 il n'y a pas de contrat de déterminisme à éprouver,
+-- donc la cible est ABSENTE plutôt que stubée. Une gate qui passe en n'ayant rien
+-- vérifié est pire que pas de gate.
+if kHasFoundation then
+
 target("test-infer-parity")
     set_kind("binary")
     set_group("tests")
     set_default(false)
-    add_deps("lpl-infer")
+    add_deps("lpl-infer", "lpl-foundation")
     add_files("tests/test_infer_parity.cpp")
 target_end()
 
@@ -187,6 +249,24 @@ target("test-grammar-constraint")
     set_kind("binary")
     set_group("tests")
     set_default(false)
-    add_deps("lpl-infer", "lpl-mind")
+    add_deps("lpl-infer", "lpl-foundation")
     add_files("tests/test_grammar_constraint.cpp")
 target_end()
+
+target("test-satellite-parity")
+    set_kind("binary")
+    set_group("tests")
+    set_default(false)
+    add_deps("lpl-satellite", "lpl-foundation")
+    add_files("tests/test_satellite_parity.cpp")
+target_end()
+
+target("test-agency-parity")
+    set_kind("binary")
+    set_group("tests")
+    set_default(false)
+    add_deps("lpl-mind", "lpl-foundation")
+    add_files("tests/test_agency_parity.cpp")
+target_end()
+
+end -- if kHasFoundation

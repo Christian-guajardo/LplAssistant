@@ -14,7 +14,11 @@
  *   - **with the foundation** (`LPL_HAS_FOUNDATION`): the real `lpl::core` types and
  *     assertions, and `lpl::math::Fixed32`/CORDIC are reachable. This is the build
  *     that can honour the determinism contract and be compiled -ffreestanding into
- *     the kernel.
+ *     the kernel. It also reaches `lpl/agent/Decision.hpp` — headers only, no
+ *     library — which is where the ONE decision seam lives. That seam has to be
+ *     shared rather than mirrored: a hosted demon and a ring-0 demon that plugged
+ *     into two look-alike interfaces would drift, which is precisely what happened to
+ *     `apps/mapview` until it carried bugs the engine no longer had.
  *   - **standalone**: primitive ALIASES only, declared here. They are aliases of the
  *     very same standard types `lpl::core` uses, so the two cannot disagree — but
  *     Fixed32 and CORDIC are NOT emulated, and no substitute is offered.

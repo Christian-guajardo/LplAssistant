@@ -59,9 +59,9 @@ LplPlugin se construit sans LplKernel. Le socle (Fixed32, CORDIC, ombrelles
 `lpl::pmr`) est une amélioration **détectée**, jamais une exigence :
 
 ```sh
-xmake f --root --foundation=auto   # défaut : utilise LplPlugin s'il est là
-xmake f --root --foundation=n      # force le build autonome, hôte uniquement
-xmake f --root --foundation=y      # échoue si le socle est absent (pour la CI)
+xmake f --root --foundation=detect  # défaut : utilise LplPlugin s'il est là
+xmake f --root --foundation=off     # force le build autonome, hôte uniquement
+xmake f --root --foundation=force   # échoue si le socle est absent (pour la CI)
 ```
 
 | Mode | Ce qui est disponible |

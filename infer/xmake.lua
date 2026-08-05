@@ -16,10 +16,13 @@
 target("lpl-infer")
     set_kind("static")
     set_group("modules")
-    -- No add_deps on lpl-core / lpl-math: those targets belong to
-    -- LplPlugin's xmake project. Their headers arrive through the
-    -- root add_includedirs; how they LINK is decision 2 of
-    -- LplKernel/docs/ARCHITECTURE_cible.md and is not settled here.
+    -- No add_deps on lpl-core / lpl-math: those targets belong to LplPlugin's xmake
+    -- project. Their headers arrive through the root add_includedirs, and the three
+    -- translation units that have out-of-line code (CORDIC, the arena, the log sink)
+    -- through the root's `lpl-foundation` target — decision 2 of
+    -- LplKernel/docs/ARCHITECTURE_cible.md, settled as a local target rather than a
+    -- package. Not depended on from here: this module is also compiled into
+    -- libassistant.a, where those objects already live in libengine.a.
 
     -- The kernel's rules, because these sources are compiled into the kernel. Not
     -- inherited from the root on purpose: the hosted module next door cannot obey
