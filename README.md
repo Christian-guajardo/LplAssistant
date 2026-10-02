@@ -7,25 +7,42 @@ pour rapprocher).
 
 ## Architecture
 
+Découpage en modules, avec le même contrat dual que LplPlugin : ce qu'une cible
+contrainte doit pouvoir exécuter compile aussi en `-ffreestanding` pour entrer dans
+le `libassistant.a` du noyau, parce que le démon tourne en ring 0 sur le profil
+serveur. La frontière est celle que le projet trace déjà entre `editor/` et
+`procgen/` : **écrivain / lecteur**, hôte / freestanding.
+
+| Module | Cible | Rôle |
+| --- | --- | --- |
+| `infer/` | freestanding | comment le démon calcule (passe avant, quantification entière, échantillonnage contraint) |
+| `mind/` | freestanding | qui il est : persona, mémoire, boucle, budget, `Conversation` |
+| `satellite/` | freestanding | le format de fil d'un nœud de pièce — **trois** consommateurs, dont deux non x86 |
+| `voice/` | freestanding | distinguer les membres d'un foyer à l'oreille |
+| `research/` | hôte | deep research, exposé comme **bibliothèque d'outils** (pas un binaire) |
+| `backend/` | hôte | moteur d'inférence, base vectorielle, audio, protocole d'agents |
+
 ```
-┌────────────── LplAssistant (binaire principal) ──────────────┐
-│  main.cpp   REPL / --ask / --wav / --listen (UDP)            │
-│  udp_audio  serveur UDP multi-satellites (démux par adresse) │
-│  voiceprint empreinte vocale (timbre+pitch, 1 session/pers.) │
-│  tts        synthèse vocale (Piper, espeak-ng en secours)    │
-│  laplace-mic (binaire) satellite micro+haut-parleur local    │
-│  agent      retrieval → prompt → génération → mémorisation   │
-│  llm        llama.cpp + KV cache réutilisé (préfixe commun)  │
-│  embedder   bge-m3 (1024d, multilingue), normalisé L2        │
-│  db         pqxx → PostgreSQL + pgvector (index HNSW)        │
-└──────────────────────────────────────────────────────────────┘
-        │ popen
-        ▼
-  laplace-stt (binaire isolé)  ← whisper.cpp
+apps/laplace     REPL / --ask / --wav / --listen (UDP)
+apps/satellite   nœud micro + haut-parleur local (option `satellite`)
+apps/speech      transcription, dans son propre espace d'adressage (option `stt`)
 ```
 
-Le STT vit dans un binaire séparé : le ggml embarqué de whisper.cpp 1.6.2 est
-incompatible au link avec celui de llama.cpp b3775 (segfault sinon).
+Le STT vit dans un binaire séparé, et `backend/` **exclut** `SpeechInput.cpp` de sa
+bibliothèque : le ggml embarqué de whisper.cpp est incompatible au link avec celui
+de llama.cpp, et les réunir dans un même artefact reproduirait le segfault que la
+séparation évite.
+
+### Conventions
+
+Alignées sur le projet : namespaces `lpl::<module>`, fichiers `PascalCase.hpp`,
+gardes `#ifndef LPL_…_HPP`, acronymes épelés dans les identifiants, méthodes en
+`camelCase`, membres en `_underscore`, aucun `using` pour raccourcir un namespace.
+
+`-fno-rtti -fno-exceptions` sur les modules **freestanding** ; `backend/` garde les
+deux et le documente, comme `bci/` dans LplPlugin — ses dépendances (`pqxx` appelle
+`typeid`, `nlohmann_json` et `cpp-httplib` lèvent) l'exigent. Notre propre code
+n'utilise ni l'un ni l'autre. Warnings `allextra` **+ erreur**, et zéro warning.
 
 ## Modèles (dossier `models/`)
 
@@ -34,6 +51,29 @@ incompatible au link avec celui de llama.cpp b3775 (segfault sinon).
 | LLM | qwen2.5-1.5b-instruct-q4_k_m.gguf | ~1 Go |
 | Embeddings | bge-m3-q4_k_m.gguf | ~420 Mo |
 | STT | ggml-base.bin (whisper base) | ~142 Mo |
+
+## Build autonome
+
+Ce dépôt se construit et se teste **seul**, sans LplPlugin ni LplKernel — comme
+LplPlugin se construit sans LplKernel. Le socle (Fixed32, CORDIC, ombrelles
+`lpl::pmr`) est une amélioration **détectée**, jamais une exigence :
+
+```sh
+xmake f --root --foundation=detect  # défaut : utilise LplPlugin s'il est là
+xmake f --root --foundation=off     # force le build autonome, hôte uniquement
+xmake f --root --foundation=force   # échoue si le socle est absent (pour la CI)
+```
+
+| Mode | Ce qui est disponible |
+| --- | --- |
+| socle présent (`LPL_HAS_FOUNDATION`) | contrat de déterminisme, compilation `-ffreestanding` possible pour le ring 0 |
+| autonome | hôte uniquement — **Fixed32 n'est pas émulé** |
+
+`include/lpl/Foundation.hpp` est le seul endroit qui connaît la différence : il expose
+les alias primitifs en mode autonome, et n'offre **aucun substitut** à la virgule
+fixe. Une fausse Fixed32 laisserait un build autonome revendiquer une parité qu'il ne
+peut pas avoir, et la première personne à y croire déboguerait une divergence
+qu'aucun test ne peut reproduire.
 
 ## Prérequis
 
@@ -45,11 +85,13 @@ incompatible au link avec celui de llama.cpp b3775 (segfault sinon).
 
 ```sh
 service postgresql start #lance le postgresql
-xmake --root            # build (LplAssistant + laplace-stt)
-./build/linux/x86_64/release/LplAssistant                 # REPL (commandes: /mem /forget /quit)
-./build/linux/x86_64/release/LplAssistant --ask "..."     # question unique
-./build/linux/x86_64/release/LplAssistant --wav voix.wav  # entrée vocale (WAV PCM16, mono/stéréo, tout taux)
-./build/linux/x86_64/release/LplAssistant --listen 7777   # serveur UDP audio (satellites)
+xmake --root                      # build (modules + LplAssistant + lpl-stt)
+xmake --root --stt=n              # sans whisper.cpp
+xmake --root --satellite=y        # + le nœud micro local (exige PulseAudio)
+./build/linux/x86_64/release/lpl-assistant                 # REPL (commandes: /mem /forget /quit)
+./build/linux/x86_64/release/lpl-assistant --ask "..."     # question unique
+./build/linux/x86_64/release/lpl-assistant --wav voix.wav  # entrée vocale (WAV PCM16, mono/stéréo, tout taux)
+./build/linux/x86_64/release/lpl-assistant --listen 7777   # serveur UDP audio (satellites)
 xmake f --root -m debug # passer en mode debug
 ```
 
@@ -117,9 +159,9 @@ xmake f --root -m debug # passer en mode debug
 (puces, `*gras*`, `` `code` ``, liens `[texte](url)`) : la voix ne prononce
 pas les caractères de mise en forme, seulement le contenu.
 
-### Satellite micro local (`laplace-mic`)
+### Satellite micro local (`lpl-mic`)
 
-En attendant les ESP32, `laplace-mic` sert de satellite de secours : il capte
+En attendant les ESP32, `lpl-mic` sert de satellite de secours : il capte
 le micro par défaut (PulseAudio ; sous WSL c'est le micro Windows via WSLg),
 détecte la parole par énergie (VAD à hystérésis + 700 ms de *hangover*), et
 streame le PCM16 mono 16 kHz en UDP — paquets de 40 ms puis `END`, exactement
@@ -132,9 +174,9 @@ micro) et le serveur filtre l'écho par le contenu (voir plus haut).
 
 ```sh
 # Terminal 1 : l'assistant
-./build/linux/x86_64/release/LplAssistant --listen 7777
+./build/linux/x86_64/release/lpl-assistant --listen 7777
 # Terminal 2 : le satellite micro (puis dites « Laplace, ... »)
-./build/linux/x86_64/release/laplace-mic --host 127.0.0.1 --port 7777
+./build/linux/x86_64/release/lpl-mic --host 127.0.0.1 --port 7777
 ```
 
 ## Configuration (variables d'environnement)
@@ -153,6 +195,49 @@ micro) et le serveur filtre l'écho par le contenu (voir plus haut).
 - **Index HNSW** pgvector pour une recherche vectorielle sub-linéaire.
 - **Sampling stabilisé** : pénalité de répétition 1.15 + top-k/min-p
   (indispensable sur un modèle 1.5B).
+
+## Deep research (module `src/research/`)
+
+Recherche profonde autonome : machine à états à actions typées (inspirée de
+jina node-DeepResearch), grammaire GBNF contraignant chaque décision JSON,
+budget de tokens avec « beast mode », checkpoint reprenable et rapport
+markdown sourcé. Voir [master_research_report.md](docs/master_research_report.md)
+et [research_reports/](docs/research_reports/) pour la genèse (15 sources analysées).
+
+```
+plan → [ boucle: search → read(CCR) → reflect(gaps) → answer(évalué) ] → rapport
+```
+
+- **search** : SearXNG (local, sans clé) + providers API-first (Wikipedia,
+  OpenAlex, arXiv, StackExchange, GitHub) — chacun classé ok/empty/error.
+- **read** : lecteur HTML→texte maison (retire script/nav/footer) puis **CCR**
+  (Compress-Cache-Retrieve) : le texte intégral va en cache disque, seule une
+  vue écrémée bornée entre dans le prompt — aucune source n'est tronquée.
+- **reflect** : nomme explicitement les lacunes et pousse des sous-questions.
+- **answer** : réponse évaluée (définitude/attribution/couverture) ; rejetée →
+  la boucle repart avec la critique.
+- **rapport** : rédaction progressive par sections + quality gates URL
+  (HEAD→GET, offline-aware) + diagnostics providers + limites.
+
+```sh
+# LLM via llama-server (cible : slots parallèles + grammaire par requête)
+LAPLACE_RESEARCH_LLM_URL=http://127.0.0.1:8080 \
+LAPLACE_SEARXNG_URL=http://127.0.0.1:8888 \
+# `research/` est une bibliothèque d'outils appelée par l'IA, plus un binaire
+
+# ou modèle local in-process (grammaire GBNF native) — sans llama-server
+./build/linux/x86_64/release/laplace-research "sujet" --guidance "précisions"
+./build/linux/x86_64/release/laplace-research --resume research_runs/<run>/
+
+# depuis le REPL de l'assistant
+Vous> /research pourquoi mon init Vulkan plante sur Intel Arc
+# ou en une passe
+./build/linux/x86_64/release/lpl-assistant --research "sujet"
+```
+
+Variables : `LAPLACE_RESEARCH_LLM_URL`, `LAPLACE_SEARXNG_URL`, `GITHUB_TOKEN`,
+`LAPLACE_RESEARCH_{BUDGET,MAX_STEPS,PROVIDERS,DIR}`. Tests bout-en-bout
+hors-ligne (LLM + web + SearXNG simulés) : `tests/mock_research_stack.py`.
 
 ## Étapes suivantes (rapport, non implémentées)
 
