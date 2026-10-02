@@ -16,7 +16,7 @@
  * compiled into a kernel that may not call any of them, and a score that used a
  * different code path on the host would make a recall gate meaningless.
  *
- * ⚠ A signature of 64 bits collides. Two unrelated texts can share bits, so a score is
+ * @warning A signature of 64 bits collides. Two unrelated texts can share bits, so a score is
  * a shortlist and never a verdict — which is exactly why the structured filter runs
  * first and why the caller gets the score rather than a boolean.
  *

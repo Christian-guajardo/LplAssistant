@@ -8,7 +8,7 @@
  * satellite, a bare-metal one and a microcontroller must not each hold their own
  * opinion about what closes an utterance.
  *
- * ⚠ The format described above is the one the hosted node and the server speak
+ * @warning The format described above is the one the hosted node and the server speak
  * TODAY, and it has a defect that this module exists to remove. Its datagrams are
  * discriminated by their first bytes — a datagram beginning with `TXT:` is a
  * transcript, anything else is audio — and a PCM16 frame is arbitrary bytes. The

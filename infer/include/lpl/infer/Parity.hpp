@@ -70,7 +70,7 @@ namespace lpl::infer {
  * Everything the gate touches comes out of one arena: the weights, the image it is
  * written to, the model read back from that image, the cache and the scratch.
  *
- * ⚠ The bytes CONSUMED are a per-target measurement and NOT a cross-target
+ * @warning The bytes CONSUMED are a per-target measurement and NOT a cross-target
  * invariant, which is worth stating because the opposite is the obvious assumption
  * and it is wrong. A bump allocator's occupancy only matches across targets when
  * everything it carves is the same size on both — and @ref LayerWeights is not: it

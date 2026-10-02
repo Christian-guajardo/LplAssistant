@@ -21,7 +21,7 @@
  * inference behind a grammar instead of behind a validator. A validator rejects a bad
  * call after it was generated; a grammar means the bad call was never spellable.
  *
- * ⚠ An action ALREADY TAKEN is left out of the language rather than filtered out of
+ * @warning An action ALREADY TAKEN is left out of the language rather than filtered out of
  * the result. The difference matters: filtering afterwards means the model spends its
  * whole budget re-proposing the move it just made and being told no, while a phrase
  * that is not in the grammar cannot be emitted in the first place. It also puts the
