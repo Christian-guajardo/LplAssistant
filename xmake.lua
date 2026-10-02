@@ -270,3 +270,22 @@ target("test-agency-parity")
 target_end()
 
 end -- if kHasFoundation
+
+-- Le format d'un rapport de recherche, tenu au contrat qu'un AUTRE dépôt lit.
+--
+-- Hors du bloc `kHasFoundation` : ce qui est vérifié ici est du texte, pas de
+-- l'arithmétique, donc un checkout autonome a encore quelque chose de réel à faire
+-- tourner — même politique que `test-corpus-identity` dans LplKnowledge.
+--
+-- ⚠ Ne dépend PAS de `lpl-research`, et c'est la raison d'être de Findings.cpp :
+-- cette cible-là tire llama.cpp et cpp-httplib, dont la récupération de paquet peut
+-- échouer (c'est déjà pourquoi `validate.sh` configure avec `--stt=n`). Une gate qui
+-- ne construit pas est une gate rouge pour une raison qui n'a rien à voir avec ce
+-- qu'elle vérifie. Le fichier source est compilé directement, seul.
+target("test-research-report")
+    set_kind("binary")
+    set_group("tests")
+    set_default(false)
+    add_includedirs("research/include")
+    add_files("tests/test_research_report.cpp", "research/src/Findings.cpp")
+target_end()
