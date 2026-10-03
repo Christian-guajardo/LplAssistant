@@ -271,21 +271,20 @@ target_end()
 
 end -- if kHasFoundation
 
--- Le format d'un rapport de recherche, tenu au contrat qu'un AUTRE dépôt lit.
+-- The format of a research report, held to the contract ANOTHER repository reads.
 --
--- Hors du bloc `kHasFoundation` : ce qui est vérifié ici est du texte, pas de
--- l'arithmétique, donc un checkout autonome a encore quelque chose de réel à faire
--- tourner — même politique que `test-corpus-identity` dans LplKnowledge.
+-- Outside the `kHasFoundation` block: what it checks is text, not arithmetic, so a
+-- standalone checkout still has something real to run, the same policy as
+-- `test-corpus-identity` in LplKnowledge.
 --
--- ⚠ Ne dépend PAS de `lpl-research`, et c'est la raison d'être de Findings.cpp :
--- cette cible-là tire llama.cpp et cpp-httplib, dont la récupération de paquet peut
--- échouer (c'est déjà pourquoi `validate.sh` configure avec `--stt=n`). Une gate qui
--- ne construit pas est une gate rouge pour une raison qui n'a rien à voir avec ce
--- qu'elle vérifie. Le fichier source est compilé directement, seul.
+-- Warning: it does NOT depend on `lpl-research`, whose package fetch can fail (it is
+-- already why the maintainer's local `validate.sh` script, not part of this repository,
+-- configures with `--stt=n`). A gate that does not build is red for a reason unrelated
+-- to what it checks, so it compiles ReportMarkdown.cpp alone.
 target("test-research-report")
     set_kind("binary")
     set_group("tests")
     set_default(false)
     add_includedirs("research/include")
-    add_files("tests/test_research_report.cpp", "research/src/Findings.cpp")
+    add_files("tests/test_research_report.cpp", "research/src/ReportMarkdown.cpp")
 target_end()
