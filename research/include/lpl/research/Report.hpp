@@ -2,11 +2,6 @@
  * @file Report.hpp
  * @brief The final report, written section by section.
  *
- * Never one long generation: a plan of sections first, then each section written
- * separately. Plus quality gates on every cited URL and an explicit statement of the
- * run's limits — a report that hides what it could not verify is worse than a short
- * one.
- *
  * @author MasterLaplace
  * @version 0.1.0
  * @copyright MIT License
@@ -25,12 +20,23 @@
 namespace lpl::research {
 struct ResearchOptions;
 
-// Rédige le rapport final dans <run_dir>/report.md :
-// plan de sections généré, rédaction progressive section par section
-// (star-hengxing : jamais un long rapport en un seul appel), références,
-// quality gates URL (HEAD -> GET, offline-aware), diagnostics providers
-// et limites. Renvoie le chemin du fichier.
-std::string writeReport(RunState& st, LanguageModelClient& llm, const ResearchOptions& opt);
+/**
+ * @brief Writes the final report of a run to `<run_dir>/report.md`.
+ *
+ * Never one long generation (the star-hengxing rule): the model plans at most five section
+ * titles, then writes each section in a call of its own, and the run is checkpointed after each
+ * one. An unreadable plan gives a report without detailed sections. Every source that was read
+ * successfully is re-checked over HTTP, HEAD first and GET as a fallback. The layout, from the
+ * findings list to the provider diagnostics and the run's limits, is @ref assembleReport: a
+ * report that hides what it could not verify is worse than a short one.
+ *
+ * @param st  The run. Its token count grows by what planning and writing cost.
+ * @param llm The model that plans and writes the sections.
+ * @param opt Not read.
+ * @return The path of the written report.
+ * @throws std::runtime_error Naming the path, when the report could not be written.
+ */
+[[nodiscard]] std::string writeReport(RunState& st, LanguageModelClient& llm, const ResearchOptions& opt);
 
 } // namespace lpl::research
 

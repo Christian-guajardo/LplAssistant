@@ -270,3 +270,21 @@ target("test-agency-parity")
 target_end()
 
 end -- if kHasFoundation
+
+-- The format of a research report, held to the contract ANOTHER repository reads.
+--
+-- Outside the `kHasFoundation` block: what it checks is text, not arithmetic, so a
+-- standalone checkout still has something real to run, the same policy as
+-- `test-corpus-identity` in LplKnowledge.
+--
+-- Warning: it does NOT depend on `lpl-research`, whose package fetch can fail (it is
+-- already why the maintainer's local `validate.sh` script, not part of this repository,
+-- configures with `--stt=n`). A gate that does not build is red for a reason unrelated
+-- to what it checks, so it compiles ReportMarkdown.cpp alone.
+target("test-research-report")
+    set_kind("binary")
+    set_group("tests")
+    set_default(false)
+    add_includedirs("research/include")
+    add_files("tests/test_research_report.cpp", "research/src/ReportMarkdown.cpp")
+target_end()
