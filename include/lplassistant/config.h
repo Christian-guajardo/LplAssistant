@@ -492,11 +492,11 @@
 /** @name Requirements: what this repository needs, checked by the compiler whatever the build system @{ */
 #if defined(LPL_HAS_FOUNDATION)
     #if defined(__has_include)
-        #if !__has_include(<lpl/config.h>)
-            #error "LplAssistant needs LplPlugin 0.2.0 or later, and the LplPlugin found has no lpl/config.h: update it"
+        #if !__has_include(<lplplugin/config.h>)
+            #error "LplAssistant needs LplPlugin 0.2.0 or later, and the LplPlugin found has no lplplugin/config.h: update it"
         #endif
     #endif
-    #include <lpl/config.h>
+    #include <lplplugin/config.h>
     #if !LPLPLUGIN_COMPATIBLE_WITH(0, 2, 0)
         #pragma message("found LplPlugin " LPLPLUGIN_VERSION_STRING)
         #if LPLPLUGIN_VERSION_MAJOR != 0
