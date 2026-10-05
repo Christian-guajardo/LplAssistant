@@ -66,7 +66,38 @@ option("foundation")
     set_description("Use the LplPlugin foundation when available (detect|force|off)")
 option_end()
 
-local kFoundationRoot = "../LplKernel/LplPlugin"
+-- LplPlugin is a sibling of this repository. LPLPLUGIN_ROOT names another checkout; the
+-- kernel's submodule path is still tried while it exists (MasterLaplace/LplKernel#431).
+local function foundationRoot()
+    local root = os.getenv("LPLPLUGIN_ROOT")
+    if root and root ~= "" then
+        return root
+    end
+    for _, candidate in ipairs({"../LplPlugin", "../LplKernel/LplPlugin"}) do
+        local candidatePath = path.join(os.scriptdir(), candidate)
+        if os.isdir(path.join(candidatePath, "core/include")) then
+            return candidatePath
+        end
+    end
+    return path.join(os.scriptdir(), "../LplPlugin")
+end
+
+local kProjectRoot = os.scriptdir()
+local kFoundationRoot = foundationRoot()
+local kConfigHeader = path.join(os.scriptdir(), "include/lplassistant/config.h")
+
+rule("laplace.version")
+    on_load(function (target)
+        local text = io.readfile(kConfigHeader)
+        local version = {}
+        for _, part in ipairs({"MAJOR", "MINOR", "PATCH"}) do
+            table.insert(version, text:match("#define LPLASSISTANT_VERSION_" .. part .. " (%d+)"))
+        end
+        target:set("version", table.concat(version, "."))
+    end)
+rule_end()
+
+add_rules("laplace.version")
 
 local function hasFoundation()
     -- Booleans are still handled, because a configuration stored by an older checkout
@@ -106,6 +137,31 @@ end
 add_includedirs("include")
 
 local kHasFoundation = hasFoundation()
+
+-- Stamps the one translation unit that prints a tool's identity with what the source cannot
+-- know: the commits this build came from, and the build itself. Only that target recompiles
+-- when a commit changes.
+rule("laplace.identity")
+    on_load(function (target)
+        local function git(directory, arguments)
+            local output = try { function () return os.iorunv("git", table.join({"-C", directory}, arguments)) end }
+            return output and output:trim() or ""
+        end
+        local function commit(directory)
+            local sha = git(directory, {"rev-parse", "--short=7", "HEAD"})
+            if sha == "" then
+                return "unknown"
+            end
+            local dirty = git(directory, {"status", "--porcelain", "--untracked-files=no"})
+            return dirty ~= "" and (sha .. "-dirty") or sha
+        end
+        target:add("defines", 'LPLASSISTANT_COMMIT="' .. commit(kProjectRoot) .. '"')
+        target:add("defines", 'LPLASSISTANT_BUILD="' .. target:plat() .. "." .. (get_config("mode") or "debug") .. '"')
+        if kHasFoundation then
+            target:add("defines", 'LPLPLUGIN_COMMIT="' .. commit(kFoundationRoot) .. '"')
+        end
+    end)
+rule_end()
 
 if kHasFoundation then
     add_includedirs(path.join(kFoundationRoot, "core/include"))
@@ -181,10 +237,18 @@ includes("infer", "mind", "satellite", "voice", "research", "backend")
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Applications
 -- ─────────────────────────────────────────────────────────────────────────────
+target("lpl-tool-identity")
+    set_kind("static")
+    set_group("apps")
+    add_rules("laplace.identity")
+    add_includedirs("apps", {public = true})
+    add_files("apps/Identity.cpp")
+target_end()
+
 target("lpl-assistant")
     set_kind("binary")
     set_group("apps")
-    add_deps("lpl-infer", "lpl-mind-hosted", "lpl-voice", "lpl-research", "lpl-assistant-backend")
+    add_deps("lpl-tool-identity", "lpl-infer", "lpl-mind-hosted", "lpl-voice", "lpl-research", "lpl-assistant-backend")
     add_files("apps/laplace/main.cpp")
     add_packages("llama.cpp", "nlohmann_json", "cpp-httplib")
     add_syslinks("pqxx", "pq", "pthread")
