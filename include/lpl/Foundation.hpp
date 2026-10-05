@@ -39,6 +39,8 @@
 #ifndef LPL_FOUNDATION_HPP
 #    define LPL_FOUNDATION_HPP
 
+#    include <lplassistant/config.h>
+
 #    if defined(LPL_HAS_FOUNDATION)
 
 #        include <lpl/core/Assert.hpp>

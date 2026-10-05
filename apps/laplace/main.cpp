@@ -9,6 +9,8 @@
  * @copyright MIT License
  */
 
+#include "Identity.hpp"
+
 #include <lpl/mind/Conversation.hpp>
 #include <lpl/backend/Settings.hpp>
 #include <lpl/backend/VectorStore.hpp>
@@ -95,11 +97,16 @@ static void print_usage(const char* prog) {
         "  --ask <texte>     pose une question unique puis quitte\n"
         "  --listen [port]   serveur UDP audio pour satellites (défaut 7777)\n"
         "  --research <sujet> lance une recherche profonde et écrit un rapport md\n"
+        "  --version         affiche la version, le commit et le build, et le LplPlugin utilisé\n"
         "  (sans option)     REPL interactif. Commandes: /mem /forget /research /quit\n",
         prog);
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && !std::strcmp(argv[1], "--version")) {
+        lpl::apps::printIdentity(stdout, "lpl-assistant");
+        return 0;
+    }
     std::string wavePath, one_shot, research_topic;
     int listen_port = 0;
     for (int i = 1; i < argc; ++i) {
