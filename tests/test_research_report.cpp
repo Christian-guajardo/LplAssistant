@@ -10,7 +10,7 @@
  * What this checks is therefore not that the prose is good — no test can — but that the
  * machine-readable half is present and shaped as agreed, whatever the model writes around it.
  *
- * It also WRITES a report, so the maintainer's local `validate.sh` script can feed the writer's
+ * It also WRITES a report, so the full validation can feed the writer's
  * real output to the reader in LplKnowledge rather than a hand-typed imitation of it. A fixture
  * typed into the reader's own test proves only that the reader agrees with itself.
  *
@@ -274,7 +274,7 @@ int main(int argc, char **argv)
     check(headingsStartingWith(assembleReport(headedSynthesis, background, gates, stamp), "Constats") == 1,
           "a heading in the synthesis that reads like the findings list is disarmed");
 
-    // ── The fixture the local validate.sh script feeds to the reader ──────────
+    // ── The fixture the full validation feeds to the reader ──────────
     if (argc >= 2)
     {
         std::ofstream out{argv[1], std::ios::binary};
