@@ -342,9 +342,8 @@ end -- if kHasFoundation
 -- `test-corpus-identity` in LplKnowledge.
 --
 -- Warning: it does NOT depend on `lpl-research`, whose package fetch can fail (it is
--- already why the maintainer's local `validate.sh` script, not part of this repository,
--- configures with `--stt=n`). A gate that does not build is red for a reason unrelated
--- to what it checks, so it compiles ReportMarkdown.cpp alone.
+-- already why the full validation configures with `--stt=n`). A gate that does not build is
+-- red for a reason unrelated to what it checks, so it compiles ReportMarkdown.cpp alone.
 target("test-research-report")
     set_kind("binary")
     set_group("tests")
