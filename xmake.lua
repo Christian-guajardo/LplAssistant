@@ -171,6 +171,8 @@ if kHasFoundation then
     -- self-contained (it includes core/Types.hpp and nothing else) and declares pure
     -- interfaces, so consuming it costs an include path and no link.
     add_includedirs(path.join(kFoundationRoot, "agent/include"))
+    -- testing/, for the gate tests: lpl::testing declares them, and runs them on the host and in ring 0.
+    add_includedirs(path.join(kFoundationRoot, "testing/include"))
     add_defines("LPL_HAS_FOUNDATION")
 else
     print("[%s] standalone build: LplPlugin foundation absent, host only", "LplAssistant")
@@ -229,6 +231,14 @@ if kHasFoundation then
         add_files(path.join(kFoundationRoot, "math/src/Cordic.cpp"))
         add_files(path.join(kFoundationRoot, "memory/src/ArenaAllocator.cpp"))
         add_files(path.join(kFoundationRoot, "core/src/Log.cpp"))
+    target_end()
+
+    -- The runner of lpl::testing and its host entry point, for test-assistant.
+    target("lpl-testing")
+        set_kind("static")
+        set_group("modules")
+        add_files(path.join(kFoundationRoot, "testing/src/Runner.cpp"))
+        add_files(path.join(kFoundationRoot, "testing/host/main.cpp"))
     target_end()
 end
 
@@ -301,12 +311,15 @@ target_end()
 -- vérifié est pire que pas de gate.
 if kHasFoundation then
 
-target("test-infer-parity")
+-- The gate tests: every LPL_TEST of tests/<module>/, in KTAP. A debug LplKernel runs the same
+-- sources in ring 0, and its records must equal these. `xmake run test-assistant 'satellite.*'`
+-- runs one suite.
+target("test-assistant")
     set_kind("binary")
     set_group("tests")
     set_default(false)
-    add_deps("lpl-infer", "lpl-foundation")
-    add_files("tests/test_infer_parity.cpp")
+    add_deps("lpl-testing", "lpl-mind", "lpl-satellite", "lpl-foundation")
+    add_files("tests/*/*.cpp")
 target_end()
 
 target("test-grammar-constraint")
@@ -315,22 +328,6 @@ target("test-grammar-constraint")
     set_default(false)
     add_deps("lpl-infer", "lpl-foundation")
     add_files("tests/test_grammar_constraint.cpp")
-target_end()
-
-target("test-satellite-parity")
-    set_kind("binary")
-    set_group("tests")
-    set_default(false)
-    add_deps("lpl-satellite", "lpl-foundation")
-    add_files("tests/test_satellite_parity.cpp")
-target_end()
-
-target("test-agency-parity")
-    set_kind("binary")
-    set_group("tests")
-    set_default(false)
-    add_deps("lpl-mind", "lpl-foundation")
-    add_files("tests/test_agency_parity.cpp")
 target_end()
 
 end -- if kHasFoundation

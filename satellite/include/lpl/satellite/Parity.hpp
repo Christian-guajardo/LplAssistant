@@ -86,8 +86,8 @@ void synthesiseFrame(core::u32 frame, core::i16 *out, core::u32 count) noexcept;
  * @struct SatelliteFoldResult
  * @brief The signatures the kernel must reproduce.
  *
- * Free of Fixed32 and bool, like every other fold result in the project, so a kernel
- * smoke can copy it field by field into a plain C struct.
+ * Free of Fixed32 and bool, like every other fold result in the project: every field is a
+ * word a test checks or records, and the kernel's records are compared with the host's.
  */
 struct SatelliteFoldResult {
     core::u32 featureSignature{0u};  ///< Fold of every frame's spectral shape.

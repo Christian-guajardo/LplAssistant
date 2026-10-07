@@ -107,8 +107,9 @@ class ParityWorld final : public agent::IWorldSurface {
  * @struct AgencyFoldResult
  * @brief The signatures the kernel must reproduce.
  *
- * Plain words only, no Fixed32 and no bool, so the kernel copies it field by field
- * exactly as it does for every other fold result in the project.
+ * Plain words only, no Fixed32 and no bool, like every other fold result in the project:
+ * every field is a word a test checks or records, and the kernel's records are compared with
+ * the host's.
  */
 struct AgencyFoldResult {
     core::u32 personaSignature{0u};    ///< Fold of who was thinking.

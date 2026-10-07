@@ -136,8 +136,10 @@ bool buildParityVocab(TensorArena &arena, Vocab &out);
  * @struct MindFoldResult
  * @brief The signatures the kernel must reproduce.
  *
- * Free of Fixed32 and bool, like every other fold result in the project, so a kernel
- * smoke can copy it field by field into a plain C struct.
+ * Free of Fixed32 and bool, like every other fold result in the project: every field is a
+ * word a test checks or records, and the kernel's records are compared with the host's.
+ * @ref arenaBytes differs between targets, so it is checked against its capacity and never
+ * recorded.
  */
 struct MindFoldResult {
     core::u32 weightSignature{0u};      ///< Fold of every quantised tensor.
