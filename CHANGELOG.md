@@ -5,6 +5,16 @@ What changed in each release, generated from the commit titles on `main`. Regene
 an edit by hand is lost at the next release, whose check refuses a file that differs from
 what the history gives.
 
+## [0.2.0] - 2026-10-08
+
+### Added
+
+- **tests**: Declare the tests of gates P14 to P17 once, for the host and ring 0 (#89)
+
+### Documentation
+
+- Call it the full validation, as the issues do (#87)
+
 ## [0.1.0] - 2026-10-05
 
 ### Added
