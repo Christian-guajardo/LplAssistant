@@ -10,7 +10,9 @@
  * utterance, the hangover that closes it, a reply playing, and that reply coming back
  * into the microphone. Every decision a node makes appears in it — when to start
  * sending, when to stop, when the word was heard, when it is hearing itself, and what
- * state it was in while all that happened.
+ * state it was in while all that happened. The version of the format is folded too:
+ * it is written in every datagram, and named when a datagram of the next version is
+ * refused.
  *
  * @author MasterLaplace
  * @version 0.1.0
@@ -107,6 +109,7 @@ struct SatelliteFoldResult {
     core::u32 idlePermille{0u};      ///< Share of the timeline spent idle, in thousandths.
     core::u32 dutyPermille{0u};      ///< Share of the timeline the processor was awake.
     core::u32 taggedAudioIsAudio{0u};///< 1 when a payload beginning "TXT:" still decodes as audio.
+    core::u32 refusedVersion{0u};    ///< Version named when a datagram one version ahead is refused, 0 otherwise.
 };
 
 /**
