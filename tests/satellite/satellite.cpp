@@ -151,6 +151,22 @@ LPL_TEST(an_unknown_version_is_refused_by_name)
                    unversionedFrame.refusal == lpl::satellite::Refusal::UnknownVersion &&
                    unversionedFrame.version == static_cast<lpl::core::u8>(lpl::satellite::Datagram::Audio),
                "a datagram from before the version is refused, its kind named as the version it got");
+
+    bool everyUnversionedHeaderIsNamed = true;
+
+    for (lpl::core::u8 unversionedKind = 1u; everyUnversionedHeaderIsNamed && unversionedKind <= 6u; ++unversionedKind)
+    {
+        const lpl::core::u8 unversionedHeader[] = {lpl::satellite::kMagicFirst, lpl::satellite::kMagicSecond,
+                                                   unversionedKind, 9u};
+        lpl::satellite::Frame unversionedHeaderFrame{};
+
+        everyUnversionedHeaderIsNamed =
+            !lpl::satellite::decode(unversionedHeader, sizeof(unversionedHeader), unversionedHeaderFrame) &&
+            unversionedHeaderFrame.refusal == lpl::satellite::Refusal::UnknownVersion &&
+            unversionedHeaderFrame.version == unversionedKind;
+    }
+    test.check(everyUnversionedHeaderIsNamed,
+               "every four-byte header of the unversioned format is refused by the version it seems to carry");
 }
 
 /**
