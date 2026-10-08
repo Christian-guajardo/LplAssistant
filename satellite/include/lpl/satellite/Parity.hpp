@@ -10,7 +10,9 @@
  * utterance, the hangover that closes it, a reply playing, and that reply coming back
  * into the microphone. Every decision a node makes appears in it — when to start
  * sending, when to stop, when the word was heard, when it is hearing itself, and what
- * state it was in while all that happened.
+ * state it was in while all that happened. The version of the format is folded too:
+ * it is written in every datagram, and named when a datagram of the next version is
+ * refused.
  *
  * @author MasterLaplace
  * @version 0.1.0

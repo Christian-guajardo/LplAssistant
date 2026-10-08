@@ -108,7 +108,7 @@ enum class Datagram : core::u8 {
 enum class Refusal : core::u8 {
     None = 0u,           ///< Accepted.
     NotSatellite = 1u,   ///< No magic: not a satellite datagram at all.
-    ShortHeader = 2u,    ///< The magic, then fewer bytes than a header holds.
+    ShortHeader = 2u,    ///< The magic, then fewer bytes than a header of this version holds.
     UnknownVersion = 3u, ///< A version this reader does not speak, named in @ref Frame::version.
     UnknownKind = 4u,    ///< A kind the protocol does not define.
     PartialSample = 5u,  ///< An audio payload that is empty or cut mid-sample.
@@ -123,7 +123,8 @@ enum class Refusal : core::u8 {
  */
 struct Frame {
     Datagram kind{Datagram::Unknown};
-    core::u8 version{0u}; ///< The version byte read, kept when it is the reason for a refusal.
+    core::u8 version{0u}; /**< The version byte read; 0 when the datagram ends before it, which only
+                               @ref refusal tells apart from a version 0 on the wire. */
     core::u8 sequence{0u};
     const core::u8 *payload{nullptr};
     core::u32 payloadBytes{0u};
