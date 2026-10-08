@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: "LplAssistant"
 abstract: "A local voice and text assistant in C++20 (llama.cpp, whisper.cpp, PostgreSQL with pgvector), whose freestanding part runs in the Laplace kernel's ring 0."
-version: "0.2.0"
+version: "0.2.1"
 date-released: "2026-10-08"
 authors:
   - alias: "Christian-guajardo"

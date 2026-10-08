@@ -348,3 +348,13 @@ target("test-research-report")
     add_includedirs("research/include")
     add_files("tests/test_research_report.cpp", "research/src/ReportMarkdown.cpp")
 target_end()
+
+-- The exits of lpl-assistant that come before any model, read through a pipe. Each returns from
+-- main and so runs every destructor registered at exit, where #82 aborted all three.
+target("test-early-exit")
+    set_kind("binary")
+    set_group("tests")
+    set_default(false)
+    add_deps("lpl-assistant", {inherit = false})
+    add_files("tests/test_early_exit.cpp")
+target_end()
