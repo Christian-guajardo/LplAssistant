@@ -107,6 +107,7 @@ struct SatelliteFoldResult {
     core::u32 idlePermille{0u};      ///< Share of the timeline spent idle, in thousandths.
     core::u32 dutyPermille{0u};      ///< Share of the timeline the processor was awake.
     core::u32 taggedAudioIsAudio{0u};///< 1 when a payload beginning "TXT:" still decodes as audio.
+    core::u32 refusedVersion{0u};    ///< Version named when a datagram one version ahead is refused, 0 otherwise.
 };
 
 /**

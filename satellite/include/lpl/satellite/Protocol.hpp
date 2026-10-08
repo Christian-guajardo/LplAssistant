@@ -17,11 +17,11 @@
  * reply therefore gets printed as text and never played, at random, and nothing
  * reports an error.
  *
- * The fix is a four-byte HEADER rather than a longer tag, and the difference is not
+ * The fix is a five-byte HEADER rather than a longer tag, and the difference is not
  * cosmetic: a tag is read out of the payload's own bytes, so no tag can ever be
- * unambiguous; a header occupies bytes 0 to 3 and the payload starts at 4, so an
+ * unambiguous; a header occupies bytes 0 to 4 and the payload starts at 5, so an
  * audio sample cannot be read as a kind whatever its value. Ambiguity removed by
- * construction, not made unlikely. The cost is four bytes on a 1280-byte frame.
+ * construction, not made unlikely. The cost is five bytes on a 1280-byte frame.
  *
  * @author MasterLaplace
  * @version 0.1.0
@@ -61,8 +61,23 @@ inline constexpr core::u8 kMagicFirst = 0x4Cu;
 /// Second header byte, 'S'.
 inline constexpr core::u8 kMagicSecond = 0x53u;
 
-/// Bytes before the payload: magic, kind, sequence.
-inline constexpr core::u32 kHeaderBytes = 4u;
+/**
+ * @brief Third header byte: the version of the format this node writes, and the only one it reads.
+ *
+ * Seven rather than one. The unversioned header carried its kind in this byte, and its
+ * kinds run from 1 to 6: a version among them would let a datagram from a node that
+ * predates the version pass for one of this version, its kind and sequence read a byte
+ * off. Above them, each format refuses the other's datagrams outright.
+ */
+inline constexpr core::u8 kProtocolVersion = 7u;
+
+/**
+ * @brief Bytes before the payload: magic, version, kind, sequence.
+ *
+ * Five, which puts the payload at an odd offset: its PCM16 samples are assembled from
+ * byte pairs, never read through an `i16` pointer.
+ */
+inline constexpr core::u32 kHeaderBytes = 5u;
 
 /**
  * @enum Datagram
@@ -83,6 +98,23 @@ enum class Datagram : core::u8 {
 };
 
 /**
+ * @enum Refusal
+ * @brief Why @ref decode refused a datagram.
+ *
+ * One value per cause, because each calls for a different response: someone else's
+ * traffic is ignored, a node speaking another version is reported by its version, and
+ * a truncated datagram points at the link.
+ */
+enum class Refusal : core::u8 {
+    None = 0u,           ///< Accepted.
+    NotSatellite = 1u,   ///< No magic: not a satellite datagram at all.
+    ShortHeader = 2u,    ///< The magic, then fewer bytes than a header holds.
+    UnknownVersion = 3u, ///< A version this reader does not speak, named in @ref Frame::version.
+    UnknownKind = 4u,    ///< A kind the protocol does not define.
+    PartialSample = 5u,  ///< An audio payload that is empty or cut mid-sample.
+};
+
+/**
  * @struct Frame
  * @brief A decoded datagram: what it is, and where its payload starts.
  *
@@ -91,9 +123,11 @@ enum class Datagram : core::u8 {
  */
 struct Frame {
     Datagram kind{Datagram::Unknown};
+    core::u8 version{0u}; ///< The version byte read, kept when it is the reason for a refusal.
     core::u8 sequence{0u};
     const core::u8 *payload{nullptr};
     core::u32 payloadBytes{0u};
+    Refusal refusal{Refusal::None}; ///< Why the datagram was refused, @ref Refusal::None when it was not.
 };
 
 /**
@@ -131,10 +165,14 @@ core::u32 encode(Datagram kind, core::u8 sequence, const core::u8 *payload, core
  * satellite link carries other traffic — a stray broadcast, a port scan, the tail of
  * something else — and a decoder that fell back to "probably audio" would play it.
  *
+ * The version is read before anything after it, because a header of another version
+ * may lay out its kind and sequence differently.
+ *
  * @param bytes The datagram.
  * @param count Its length.
- * @param out   Receives the decoding.
- * @return false when it is not one of ours, or is malformed.
+ * @param out   Receives the decoding, and on a refusal its reason in @ref Frame::refusal.
+ * @return false when it is refused: not one of ours, of a version this reader does not
+ *         speak, or malformed.
  */
 [[nodiscard]] bool decode(const core::u8 *bytes, core::u32 count, Frame &out) noexcept;
 
