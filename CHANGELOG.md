@@ -5,6 +5,12 @@ What changed in each release, generated from the commit titles on `main`. Regene
 an edit by hand is lost at the next release, whose check refuses a file that differs from
 what the history gives.
 
+## [0.2.1] - 2026-10-08
+
+### Fixed
+
+- **backend**: Stop exporting the pqxx type names destroyed twice at exit (#90)
+
 ## [0.2.0] - 2026-10-08
 
 ### Added

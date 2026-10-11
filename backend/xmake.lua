@@ -29,6 +29,13 @@ target("lpl-assistant-backend")
     -- le projet : bci/ force `-fexceptions` pour exactement la même raison.
     add_cxxflags("-fexceptions", "-frtti", { force = true })
 
+    -- A program that links this archive does not export what the archive defines. Under GCC 15
+    -- (CWG 2387) `pqxx::type_name<T>`, a variable defined in a libpqxx 7 header, has external
+    -- linkage: the copy VectorStore.cpp instantiated was exported, preempted the one inside
+    -- libpqxx-7.10.so, and both modules constructed and destroyed that one object, a double free
+    -- at every exit (#82, jtv/libpqxx#1195). Hidden, each module keeps its own copy.
+    add_ldflags("-Wl,--exclude-libs,liblpl-assistant-backend.a", { public = true })
+
     -- SpeechInput reste HORS de la bibliothèque : son moteur embarque une copie de
     -- ggml incompatible au link avec celle du moteur de langage. Les réunir ici
     -- reproduirait le segfault que la séparation en deux binaires évite.

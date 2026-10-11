@@ -135,12 +135,7 @@ int main(int argc, char** argv) {
             auto client = lpl::research::make_llm_client(local.get());
             lpl::research::Engine engine(*client, lpl::research::ResearchOptions::fromEnvironment());
             std::printf("%s\n", engine.run(research_topic).c_str());
-            // Le rapport est écrit et le chemin imprimé : on sort via _Exit pour
-            // contourner un double-free connu dans le finaliseur statique de
-            // libpqxx-7.10 (frappe tout process liant pqxx, y compris --help).
-            // Les objets locaux (lpl::backend::HostInference) sont déjà détruits ici ; l'OS libère le reste.
-            std::fflush(nullptr);
-            std::_Exit(0);
+            return 0;
         } catch (const std::exception& e) {
             std::fprintf(stderr, "[laplace] erreur fatale: %s\n", e.what());
             return 1;
