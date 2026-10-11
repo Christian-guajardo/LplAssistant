@@ -25,8 +25,8 @@
  */
 #define LPLASSISTANT_NAME "LplAssistant"
 #define LPLASSISTANT_VERSION_MAJOR 0
-#define LPLASSISTANT_VERSION_MINOR 2
-#define LPLASSISTANT_VERSION_PATCH 1
+#define LPLASSISTANT_VERSION_MINOR 3
+#define LPLASSISTANT_VERSION_PATCH 0
 /** @} */
 
 /** The shared part, down to the Requirements group: laplace-config v1, from MasterLaplace/.github templates/config.h. */
