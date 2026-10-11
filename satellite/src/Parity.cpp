@@ -63,6 +63,27 @@ core::i16 square(core::u32 index, core::u32 period) noexcept
     return ((index % period) < (period / 2u)) ? kLoud : static_cast<core::i16>(-kLoud);
 }
 
+/**
+ * @brief Reads a datagram one version ahead of this reader, as a node updated before its server sends.
+ *
+ * The bytes are written out rather than encoded: the encoder only writes the version
+ * it speaks, and a datagram of another one comes from another node.
+ *
+ * @return The version the refusal named, or 0 when the datagram was accepted or refused
+ *         for another reason.
+ */
+core::u32 versionNamedByRefusal() noexcept
+{
+    const core::u8 aheadVersion = static_cast<core::u8>(kProtocolVersion + 1u);
+    const core::u8 datagram[kHeaderBytes] = {kMagicFirst, kMagicSecond, aheadVersion,
+                                             static_cast<core::u8>(Datagram::EndOfUtterance), 0u};
+    Frame decoded{};
+
+    if (decode(datagram, kHeaderBytes, decoded) || decoded.refusal != Refusal::UnknownVersion)
+        return 0u;
+    return decoded.version;
+}
+
 } // namespace
 
 bool parityFrameIsPlayback(core::u32 frame) noexcept
@@ -254,6 +275,7 @@ void foldSatelliteState(SatelliteFoldResult &out)
         out.taggedAudioIsAudio = (decode(datagram, written, decoded) && decoded.kind == Datagram::Audio) ? 1u : 0u;
     }
 
+    out.refusedVersion = versionNamedByRefusal();
     out.featureSignature = featureHash;
     out.levelSignature = levelHash;
     out.eventSignature = eventHash;
