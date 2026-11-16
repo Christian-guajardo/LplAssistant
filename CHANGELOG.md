@@ -5,7 +5,13 @@ What changed in each release, generated from the commit titles on `main`. Regene
 an edit by hand is lost at the next release, whose check refuses a file that differs from
 what the history gives.
 
-## [0.3.0] - 2026-10-11
+## [0.4.0] - 2026-11-16
+
+### Breaking
+
+- **infer**: Replace .lplmind version 1 with version 2, laid out for paging: a table of segments in front, each expert on a page boundary, each segment signed (#94)
+
+## [0.3.0] - 2026-10-12
 
 ### Breaking
 

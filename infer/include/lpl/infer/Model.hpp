@@ -40,9 +40,6 @@ namespace lpl::infer {
 /// First four bytes of a `.lplmind` image, little-endian "LPLM".
 inline constexpr core::u32 kModelMagic = 0x4D4C504Cu;
 
-/// Image layout revision. Bumped when the byte order of the sections changes.
-inline constexpr core::u32 kModelVersion = 1u;
-
 /**
  * @struct ModelConfig
  * @brief The shape of a transformer.
@@ -67,8 +64,8 @@ struct ModelConfig {
      */
     [[nodiscard]] constexpr bool valid() const noexcept
     {
-        return dim != 0u && layers != 0u && heads != 0u && ffnHidden != 0u && contextLength != 0u &&
-               vocabSize != 0u && (dim % heads) == 0u;
+        return dim != 0u && layers != 0u && heads != 0u && ffnHidden != 0u && contextLength != 0u && vocabSize != 0u &&
+               (dim % heads) == 0u;
     }
 };
 
@@ -77,13 +74,13 @@ struct ModelConfig {
  * @brief One transformer block's tensors.
  */
 struct LayerWeights {
-    QuantMatrixView query{};   ///< dim x dim
-    QuantMatrixView key{};     ///< dim x dim
-    QuantMatrixView value{};   ///< dim x dim
-    QuantMatrixView output{};  ///< dim x dim
-    QuantMatrixView gate{};    ///< ffnHidden x dim
-    QuantMatrixView up{};      ///< ffnHidden x dim
-    QuantMatrixView down{};    ///< dim x ffnHidden
+    QuantMatrixView query{};           ///< dim x dim
+    QuantMatrixView key{};             ///< dim x dim
+    QuantMatrixView value{};           ///< dim x dim
+    QuantMatrixView output{};          ///< dim x dim
+    QuantMatrixView gate{};            ///< ffnHidden x dim
+    QuantMatrixView up{};              ///< ffnHidden x dim
+    QuantMatrixView down{};            ///< dim x ffnHidden
     ConstVectorView attentionNorm{};   ///< dim
     ConstVectorView feedForwardNorm{}; ///< dim
 };
@@ -120,26 +117,47 @@ public:
      * and a @ref QuantBlock read through a misaligned pointer is undefined on the
      * target this has to run on.
      *
+     * The image is a version 2 one (lpl/infer/ModelImage.hpp), read through its table, each segment's signature
+     * checked before its bytes are taken; any other version is refused.
+     *
      * @param arena Storage.
      * @param bytes The image.
      * @param size  Its length.
-     * @return false when the magic, version, shape or extent does not hold up.
+     * @return false when the magic, version, shape, table, a signature or an extent does not hold up.
      */
     bool open(TensorArena &arena, const core::u8 *bytes, core::u32 size);
 
     /**
-     * @brief Bytes @ref writeBlob would produce for this model.
+     * @brief Bytes @ref writeBlob would produce for this model, its experts on 4 KiB boundaries.
      * @return The image size, or 0 when the model is unbuilt.
      */
     [[nodiscard]] core::u32 blobBytes() const noexcept;
 
     /**
-     * @brief Serialises this model.
+     * @brief Bytes @ref writeBlob would produce for this model, its experts on boundaries of 2^@p alignmentLog2.
+     * @param alignmentLog2 From 12, 4 KiB, to 22, 4 MiB (lpl/infer/ModelImage.hpp).
+     * @return The image size, or 0 when the model is unbuilt, the alignment is refused or the image would pass 32
+     *         bits.
+     */
+    [[nodiscard]] core::u32 blobBytes(core::u32 alignmentLog2) const noexcept;
+
+    /**
+     * @brief Serialises this model as a version 2 image (lpl/infer/ModelImage.hpp), its experts on 4 KiB boundaries.
      * @param out      Receives the image.
      * @param capacity Room in @p out.
      * @return Bytes written, or 0 when the model is unbuilt or the room is short.
      */
     [[nodiscard]] core::u32 writeBlob(core::u8 *out, core::u32 capacity) const noexcept;
+
+    /**
+     * @brief Serialises this model as a version 2 image, its experts on boundaries of 2^@p alignmentLog2, the
+     *        padding zero.
+     * @param out           Receives the image.
+     * @param capacity      Room in @p out.
+     * @param alignmentLog2 From 12, 4 KiB, to 22, 4 MiB.
+     * @return Bytes written, or 0 when the model is unbuilt, the alignment is refused or the room is short.
+     */
+    [[nodiscard]] core::u32 writeBlob(core::u8 *out, core::u32 capacity, core::u32 alignmentLog2) const noexcept;
 
     /**
      * @brief Writes a token's embedding into @p out.
@@ -204,6 +222,12 @@ public:
     [[nodiscard]] core::u32 fold(core::u32 hash) const noexcept;
 
 private:
+    /**
+     * @brief Reads a version 2 image through its table, each segment's signature checked first.
+     * @return false when the table, a signature or a segment's content does not hold up.
+     */
+    bool openImage(TensorArena &arena, const core::u8 *bytes, core::u32 size);
+
     ModelConfig _config{};
     Vocab _vocab{};
     QuantMatrixView _embedding{};

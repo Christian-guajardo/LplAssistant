@@ -8,6 +8,7 @@
  */
 
 #include <lpl/infer/Model.hpp>
+#include <lpl/infer/ModelImage.hpp>
 
 #if defined(LPL_HAS_FOUNDATION)
 
@@ -18,12 +19,6 @@ namespace lpl::infer {
 namespace {
 
 static_assert(sizeof(QuantBlock) == 4u + kQuantBlockLanes, "QuantBlock must have no padding to serialise field-wise");
-
-/// Bytes one block occupies in an image: the scale, then the lanes.
-constexpr core::u32 kBlockImageBytes = 4u + kQuantBlockLanes;
-
-/// Header words before the vocabulary: magic, version, six extents, blob length.
-constexpr core::u32 kHeaderWords = 9u;
 
 /**
  * @brief Per-tensor stream salts.
@@ -223,14 +218,115 @@ bool readMatrix(TensorArena &arena, const core::u8 *&cursor, core::u32 rows, cor
 }
 
 /**
- * @brief Bytes a quantised matrix of this shape occupies in an image.
- * @param rows    Output rows.
- * @param columns Input width.
- * @return The byte count.
+ * @brief Writes a vector of Q16.16 values into an image.
+ * @param cursor Write position.
+ * @param vector The values.
  */
-core::u32 matrixImageBytes(core::u32 rows, core::u32 columns) noexcept
+void writeVector(core::u8 *&cursor, ConstVectorView vector) noexcept
 {
-    return rows * quantBlockCount(columns) * kBlockImageBytes;
+    for (core::u32 i = 0u; i < vector.count; ++i)
+        putWord(cursor, static_cast<core::u32>(vector.values[i].raw()));
+}
+
+/**
+ * @brief Reads @p count Q16.16 values out of an image and into the arena.
+ * @return false when the arena is exhausted.
+ */
+bool readVector(TensorArena &arena, const core::u8 *&cursor, core::u32 count, ConstVectorView &out)
+{
+    math::Fixed32 *const values = arena.claim<math::Fixed32>(count);
+    if (values == nullptr)
+        return false;
+    for (core::u32 i = 0u; i < count; ++i)
+        values[i] = math::Fixed32::fromRaw(static_cast<core::i32>(takeWord(cursor)));
+    out = ConstVectorView{values, count};
+    return true;
+}
+
+/**
+ * @brief Reads a vocabulary of @p count entries and @p textBytes of text out of an image, every entry inside the text.
+ * @return false when an entry is empty, longer than a token, past the text, or the arena is exhausted.
+ */
+bool readVocabulary(TensorArena &arena, const core::u8 *&cursor, core::u32 count, core::u32 textBytes, Vocab &out)
+{
+    VocabEntry *const entries = arena.claim<VocabEntry>(count);
+    char *const text = arena.claim<char>(textBytes);
+    if (entries == nullptr || text == nullptr)
+        return false;
+
+    for (core::u32 i = 0u; i < count; ++i)
+    {
+        entries[i].offset = takeWord(cursor);
+        entries[i].length = takeWord(cursor);
+        if (entries[i].length == 0u || entries[i].length > kMaxTokenBytes || entries[i].offset > textBytes ||
+            entries[i].length > textBytes - entries[i].offset)
+            return false;
+    }
+    for (core::u32 i = 0u; i < textBytes; ++i)
+        text[i] = static_cast<char>(cursor[i]);
+    cursor += textBytes;
+    return out.build(arena, text, textBytes, entries, count);
+}
+
+/**
+ * @brief Reads a layer's attention segment: its two norms, then its query, key, value and output matrices.
+ * @return false when the arena is exhausted.
+ */
+bool readAttention(TensorArena &arena, const core::u8 *&cursor, const ModelConfig &shape, LayerWeights &out)
+{
+    return readVector(arena, cursor, shape.dim, out.attentionNorm) &&
+           readVector(arena, cursor, shape.dim, out.feedForwardNorm) &&
+           readMatrix(arena, cursor, shape.dim, shape.dim, out.query) &&
+           readMatrix(arena, cursor, shape.dim, shape.dim, out.key) &&
+           readMatrix(arena, cursor, shape.dim, shape.dim, out.value) &&
+           readMatrix(arena, cursor, shape.dim, shape.dim, out.output);
+}
+
+/**
+ * @brief Reads a layer's expert segment: its gate, up and down matrices.
+ * @return false when the arena is exhausted.
+ */
+bool readExpert(TensorArena &arena, const core::u8 *&cursor, const ModelConfig &shape, LayerWeights &out)
+{
+    return readMatrix(arena, cursor, shape.ffnHidden, shape.dim, out.gate) &&
+           readMatrix(arena, cursor, shape.ffnHidden, shape.dim, out.up) &&
+           readMatrix(arena, cursor, shape.dim, shape.ffnHidden, out.down);
+}
+
+/**
+ * @brief Writes the bytes of @p segment of @p model at @p at: what its role holds, in the order the readers take it.
+ */
+void writeSegment(core::u8 *at, const Model &model, const ModelSegment &segment) noexcept
+{
+    core::u8 *cursor = at;
+
+    switch (segment.role)
+    {
+    case ModelSegmentRole::Vocabulary:
+        for (core::u32 i = 0u; i < model.vocab().size(); ++i)
+        {
+            putWord(cursor, model.vocab().entries()[i].offset);
+            putWord(cursor, model.vocab().entries()[i].length);
+        }
+        for (core::u32 i = 0u; i < model.vocab().blobBytes(); ++i)
+            *cursor++ = static_cast<core::u8>(model.vocab().blob()[i]);
+        return;
+    case ModelSegmentRole::Embedding: writeMatrix(cursor, model.embedding()); return;
+    case ModelSegmentRole::Attention:
+        writeVector(cursor, model.layer(segment.layer - 1u).attentionNorm);
+        writeVector(cursor, model.layer(segment.layer - 1u).feedForwardNorm);
+        writeMatrix(cursor, model.layer(segment.layer - 1u).query);
+        writeMatrix(cursor, model.layer(segment.layer - 1u).key);
+        writeMatrix(cursor, model.layer(segment.layer - 1u).value);
+        writeMatrix(cursor, model.layer(segment.layer - 1u).output);
+        return;
+    case ModelSegmentRole::FinalNorm: writeVector(cursor, model.finalNorm()); return;
+    case ModelSegmentRole::FeedForward:
+        writeMatrix(cursor, model.layer(segment.layer - 1u).gate);
+        writeMatrix(cursor, model.layer(segment.layer - 1u).up);
+        writeMatrix(cursor, model.layer(segment.layer - 1u).down);
+        return;
+    }
 }
 
 } // namespace
@@ -287,174 +383,91 @@ bool Model::synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab
     return true;
 }
 
-bool Model::open(TensorArena &arena, const core::u8 *bytes, core::u32 size)
+bool Model::openImage(TensorArena &arena, const core::u8 *bytes, core::u32 size)
 {
-    if (bytes == nullptr || size < kHeaderWords * 4u)
+    const ModelImageInspection inspection = inspectModelImage(bytes, size, nullptr, 0u);
+    if (inspection.verdict != ModelImageVerdict::Accepted)
         return false;
 
-    const core::u8 *cursor = bytes;
-    if (takeWord(cursor) != kModelMagic)
-        return false;
-    if (takeWord(cursor) != kModelVersion)
-        return false;
-
-    ModelConfig shape{};
-    shape.dim = takeWord(cursor);
-    shape.layers = takeWord(cursor);
-    shape.heads = takeWord(cursor);
-    shape.ffnHidden = takeWord(cursor);
-    shape.contextLength = takeWord(cursor);
-    shape.vocabSize = takeWord(cursor);
-    const core::u32 vocabBlobBytes = takeWord(cursor);
-    if (!shape.valid() || vocabBlobBytes == 0u)
-        return false;
-
-    // The declared extent is checked before a single byte past the header is read.
-    // An image that says it holds more than it does is the ordinary shape of
-    // corruption, and reading it would fault rather than report.
-    const core::u32 vocabPadded = (vocabBlobBytes + 3u) & ~3u;
-    core::u64 expected = static_cast<core::u64>(kHeaderWords) * 4u;
-    expected += static_cast<core::u64>(shape.vocabSize) * 8u;
-    expected += vocabPadded;
-    expected += matrixImageBytes(shape.vocabSize, shape.dim);
-    for (core::u32 l = 0u; l < shape.layers; ++l)
-    {
-        expected += static_cast<core::u64>(shape.dim) * 4u * 2u;
-        expected += 4u * static_cast<core::u64>(matrixImageBytes(shape.dim, shape.dim));
-        expected += 2u * static_cast<core::u64>(matrixImageBytes(shape.ffnHidden, shape.dim));
-        expected += matrixImageBytes(shape.dim, shape.ffnHidden);
-    }
-    expected += static_cast<core::u64>(shape.dim) * 4u;
-    if (expected != static_cast<core::u64>(size))
-        return false;
-
-    VocabEntry *const entries = arena.claim<VocabEntry>(shape.vocabSize);
-    char *const blob = arena.claim<char>(vocabBlobBytes);
+    const ModelConfig &shape = inspection.header.shape;
     LayerWeights *const layers = arena.claim<LayerWeights>(shape.layers);
-    if (entries == nullptr || blob == nullptr || layers == nullptr)
-        return false;
-
-    for (core::u32 i = 0u; i < shape.vocabSize; ++i)
-    {
-        entries[i].offset = takeWord(cursor);
-        entries[i].length = takeWord(cursor);
-        if (entries[i].length == 0u || entries[i].length > kMaxTokenBytes ||
-            entries[i].offset + entries[i].length > vocabBlobBytes)
-            return false;
-    }
-    for (core::u32 i = 0u; i < vocabBlobBytes; ++i)
-        blob[i] = static_cast<char>(cursor[i]);
-    cursor += vocabPadded;
-
     Vocab table;
-    if (!table.build(arena, blob, vocabBlobBytes, entries, shape.vocabSize))
+    if (layers == nullptr)
         return false;
 
-    if (!readMatrix(arena, cursor, shape.vocabSize, shape.dim, _embedding))
-        return false;
-
-    for (core::u32 l = 0u; l < shape.layers; ++l)
+    for (core::u32 index = 0u; index < inspection.header.segmentCount; ++index)
     {
-        math::Fixed32 *const attentionNorm = arena.claim<math::Fixed32>(shape.dim);
-        math::Fixed32 *const feedForwardNorm = arena.claim<math::Fixed32>(shape.dim);
-        if (attentionNorm == nullptr || feedForwardNorm == nullptr)
+        const ModelSegment segment = readModelSegmentEntry(bytes, index);
+        const core::u8 *cursor = bytes + segment.offset;
+        if (modelSegmentSignature(bytes, segment) != segment.signature)
             return false;
-        for (core::u32 i = 0u; i < shape.dim; ++i)
-            attentionNorm[i] = math::Fixed32::fromRaw(static_cast<core::i32>(takeWord(cursor)));
-        for (core::u32 i = 0u; i < shape.dim; ++i)
-            feedForwardNorm[i] = math::Fixed32::fromRaw(static_cast<core::i32>(takeWord(cursor)));
-        layers[l].attentionNorm = ConstVectorView{attentionNorm, shape.dim};
-        layers[l].feedForwardNorm = ConstVectorView{feedForwardNorm, shape.dim};
 
-        if (!readMatrix(arena, cursor, shape.dim, shape.dim, layers[l].query) ||
-            !readMatrix(arena, cursor, shape.dim, shape.dim, layers[l].key) ||
-            !readMatrix(arena, cursor, shape.dim, shape.dim, layers[l].value) ||
-            !readMatrix(arena, cursor, shape.dim, shape.dim, layers[l].output) ||
-            !readMatrix(arena, cursor, shape.ffnHidden, shape.dim, layers[l].gate) ||
-            !readMatrix(arena, cursor, shape.ffnHidden, shape.dim, layers[l].up) ||
-            !readMatrix(arena, cursor, shape.dim, shape.ffnHidden, layers[l].down))
+        bool read = false;
+        switch (segment.role)
+        {
+        case ModelSegmentRole::Vocabulary:
+            read = readVocabulary(arena, cursor, shape.vocabSize, inspection.header.vocabTextBytes, table);
+            break;
+        case ModelSegmentRole::Embedding:
+            read = readMatrix(arena, cursor, shape.vocabSize, shape.dim, _embedding);
+            break;
+        case ModelSegmentRole::Attention: read = readAttention(arena, cursor, shape, layers[segment.layer - 1u]); break;
+        case ModelSegmentRole::FinalNorm: read = readVector(arena, cursor, shape.dim, _finalNorm); break;
+        case ModelSegmentRole::FeedForward: read = readExpert(arena, cursor, shape, layers[segment.layer - 1u]); break;
+        }
+        if (!read)
             return false;
     }
-
-    math::Fixed32 *const finalNorm = arena.claim<math::Fixed32>(shape.dim);
-    if (finalNorm == nullptr)
-        return false;
-    for (core::u32 i = 0u; i < shape.dim; ++i)
-        finalNorm[i] = math::Fixed32::fromRaw(static_cast<core::i32>(takeWord(cursor)));
 
     _config = shape;
     _vocab = table;
-    _finalNorm = ConstVectorView{finalNorm, shape.dim};
     _layers = layers;
     return true;
 }
 
-core::u32 Model::blobBytes() const noexcept
+bool Model::open(TensorArena &arena, const core::u8 *bytes, core::u32 size) { return openImage(arena, bytes, size); }
+
+core::u32 Model::blobBytes() const noexcept { return blobBytes(kModelImageDefaultAlignmentLog2); }
+
+core::u32 Model::blobBytes(core::u32 alignmentLog2) const noexcept
 {
     if (!ready())
         return 0u;
 
-    const core::u32 vocabPadded = (_vocab.blobBytes() + 3u) & ~3u;
-    core::u32 total = kHeaderWords * 4u;
-    total += _config.vocabSize * 8u;
-    total += vocabPadded;
-    total += matrixImageBytes(_config.vocabSize, _config.dim);
-    for (core::u32 l = 0u; l < _config.layers; ++l)
-    {
-        total += _config.dim * 4u * 2u;
-        total += 4u * matrixImageBytes(_config.dim, _config.dim);
-        total += 2u * matrixImageBytes(_config.ffnHidden, _config.dim);
-        total += matrixImageBytes(_config.dim, _config.ffnHidden);
-    }
-    total += _config.dim * 4u;
-    return total;
+    const core::u64 bytes = layOutModelImage(_config, _vocab.blobBytes(), alignmentLog2, nullptr, 0u);
+    return bytes <= 0xFFFFFFFFull ? static_cast<core::u32>(bytes) : 0u;
 }
 
 core::u32 Model::writeBlob(core::u8 *out, core::u32 capacity) const noexcept
 {
-    const core::u32 needed = blobBytes();
+    return writeBlob(out, capacity, kModelImageDefaultAlignmentLog2);
+}
+
+core::u32 Model::writeBlob(core::u8 *out, core::u32 capacity, core::u32 alignmentLog2) const noexcept
+{
+    const core::u32 needed = blobBytes(alignmentLog2);
     if (out == nullptr || needed == 0u || capacity < needed)
         return 0u;
 
-    core::u8 *cursor = out;
-    putWord(cursor, kModelMagic);
-    putWord(cursor, kModelVersion);
-    putWord(cursor, _config.dim);
-    putWord(cursor, _config.layers);
-    putWord(cursor, _config.heads);
-    putWord(cursor, _config.ffnHidden);
-    putWord(cursor, _config.contextLength);
-    putWord(cursor, _config.vocabSize);
-    putWord(cursor, _vocab.blobBytes());
-
-    for (core::u32 i = 0u; i < _config.vocabSize; ++i)
+    const core::u32 count = modelImageSegmentCount(_config);
+    core::u64 cursor = kModelImageHeaderBytes + static_cast<core::u64>(count) * kModelSegmentEntryBytes;
+    for (core::u32 i = 0u; i < needed; ++i)
+        out[i] = 0u;
+    for (core::u32 index = 0u; index < count; ++index)
     {
-        putWord(cursor, _vocab.entries()[i].offset);
-        putWord(cursor, _vocab.entries()[i].length);
+        ModelSegment segment = placeModelSegment(_config, _vocab.blobBytes(), alignmentLog2, index, cursor);
+        writeSegment(out + segment.offset, *this, segment);
+        segment.signature = modelSegmentSignature(out, segment);
+        writeModelSegmentEntry(out, index, segment);
     }
-    for (core::u32 i = 0u; i < _vocab.blobBytes(); ++i)
-        *cursor++ = static_cast<core::u8>(_vocab.blob()[i]);
-    for (core::u32 i = _vocab.blobBytes(); i < ((_vocab.blobBytes() + 3u) & ~3u); ++i)
-        *cursor++ = 0u;
 
-    writeMatrix(cursor, _embedding);
-    for (core::u32 l = 0u; l < _config.layers; ++l)
-    {
-        for (core::u32 i = 0u; i < _config.dim; ++i)
-            putWord(cursor, static_cast<core::u32>(_layers[l].attentionNorm.values[i].raw()));
-        for (core::u32 i = 0u; i < _config.dim; ++i)
-            putWord(cursor, static_cast<core::u32>(_layers[l].feedForwardNorm.values[i].raw()));
-        writeMatrix(cursor, _layers[l].query);
-        writeMatrix(cursor, _layers[l].key);
-        writeMatrix(cursor, _layers[l].value);
-        writeMatrix(cursor, _layers[l].output);
-        writeMatrix(cursor, _layers[l].gate);
-        writeMatrix(cursor, _layers[l].up);
-        writeMatrix(cursor, _layers[l].down);
-    }
-    for (core::u32 i = 0u; i < _config.dim; ++i)
-        putWord(cursor, static_cast<core::u32>(_finalNorm.values[i].raw()));
-
+    ModelImageHeader header{};
+    header.alignmentLog2 = alignmentLog2;
+    header.segmentCount = count;
+    header.imageBytes = needed;
+    header.shape = _config;
+    header.vocabTextBytes = _vocab.blobBytes();
+    writeModelImageHeader(out, header);
     return needed;
 }
 
