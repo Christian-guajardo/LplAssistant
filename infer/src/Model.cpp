@@ -20,9 +20,6 @@ namespace {
 
 static_assert(sizeof(QuantBlock) == 4u + kQuantBlockLanes, "QuantBlock must have no padding to serialise field-wise");
 
-/** Header words of a version 1 image before the vocabulary: magic, version, six extents, blob length. */
-constexpr core::u32 kVersion1HeaderWords = 9u;
-
 /**
  * @brief Per-tensor stream salts.
  *
@@ -386,109 +383,7 @@ bool Model::synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab
     return true;
 }
 
-bool Model::openVersion1(TensorArena &arena, const core::u8 *bytes, core::u32 size)
-{
-    if (bytes == nullptr || size < kVersion1HeaderWords * 4u)
-        return false;
-
-    const core::u8 *cursor = bytes;
-    if (takeWord(cursor) != kModelMagic)
-        return false;
-    if (takeWord(cursor) != kModelImageVersion1)
-        return false;
-
-    ModelConfig shape{};
-    shape.dim = takeWord(cursor);
-    shape.layers = takeWord(cursor);
-    shape.heads = takeWord(cursor);
-    shape.ffnHidden = takeWord(cursor);
-    shape.contextLength = takeWord(cursor);
-    shape.vocabSize = takeWord(cursor);
-    const core::u32 vocabBlobBytes = takeWord(cursor);
-    if (!shape.valid() || vocabBlobBytes == 0u)
-        return false;
-
-    // The declared extent is checked before a single byte past the header is read.
-    // An image that says it holds more than it does is the ordinary shape of
-    // corruption, and reading it would fault rather than report.
-    const core::u32 vocabPadded = (vocabBlobBytes + 3u) & ~3u;
-    core::u64 expected = static_cast<core::u64>(kVersion1HeaderWords) * 4u;
-    expected += static_cast<core::u64>(shape.vocabSize) * 8u;
-    expected += vocabPadded;
-    expected += modelMatrixImageBytes(shape.vocabSize, shape.dim);
-    for (core::u32 l = 0u; l < shape.layers; ++l)
-    {
-        expected += static_cast<core::u64>(shape.dim) * 4u * 2u;
-        expected += 4u * static_cast<core::u64>(modelMatrixImageBytes(shape.dim, shape.dim));
-        expected += 2u * static_cast<core::u64>(modelMatrixImageBytes(shape.ffnHidden, shape.dim));
-        expected += modelMatrixImageBytes(shape.dim, shape.ffnHidden);
-    }
-    expected += static_cast<core::u64>(shape.dim) * 4u;
-    if (expected != static_cast<core::u64>(size))
-        return false;
-
-    VocabEntry *const entries = arena.claim<VocabEntry>(shape.vocabSize);
-    char *const blob = arena.claim<char>(vocabBlobBytes);
-    LayerWeights *const layers = arena.claim<LayerWeights>(shape.layers);
-    if (entries == nullptr || blob == nullptr || layers == nullptr)
-        return false;
-
-    for (core::u32 i = 0u; i < shape.vocabSize; ++i)
-    {
-        entries[i].offset = takeWord(cursor);
-        entries[i].length = takeWord(cursor);
-        if (entries[i].length == 0u || entries[i].length > kMaxTokenBytes ||
-            entries[i].offset + entries[i].length > vocabBlobBytes)
-            return false;
-    }
-    for (core::u32 i = 0u; i < vocabBlobBytes; ++i)
-        blob[i] = static_cast<char>(cursor[i]);
-    cursor += vocabPadded;
-
-    Vocab table;
-    if (!table.build(arena, blob, vocabBlobBytes, entries, shape.vocabSize))
-        return false;
-
-    if (!readMatrix(arena, cursor, shape.vocabSize, shape.dim, _embedding))
-        return false;
-
-    for (core::u32 l = 0u; l < shape.layers; ++l)
-    {
-        math::Fixed32 *const attentionNorm = arena.claim<math::Fixed32>(shape.dim);
-        math::Fixed32 *const feedForwardNorm = arena.claim<math::Fixed32>(shape.dim);
-        if (attentionNorm == nullptr || feedForwardNorm == nullptr)
-            return false;
-        for (core::u32 i = 0u; i < shape.dim; ++i)
-            attentionNorm[i] = math::Fixed32::fromRaw(static_cast<core::i32>(takeWord(cursor)));
-        for (core::u32 i = 0u; i < shape.dim; ++i)
-            feedForwardNorm[i] = math::Fixed32::fromRaw(static_cast<core::i32>(takeWord(cursor)));
-        layers[l].attentionNorm = ConstVectorView{attentionNorm, shape.dim};
-        layers[l].feedForwardNorm = ConstVectorView{feedForwardNorm, shape.dim};
-
-        if (!readMatrix(arena, cursor, shape.dim, shape.dim, layers[l].query) ||
-            !readMatrix(arena, cursor, shape.dim, shape.dim, layers[l].key) ||
-            !readMatrix(arena, cursor, shape.dim, shape.dim, layers[l].value) ||
-            !readMatrix(arena, cursor, shape.dim, shape.dim, layers[l].output) ||
-            !readMatrix(arena, cursor, shape.ffnHidden, shape.dim, layers[l].gate) ||
-            !readMatrix(arena, cursor, shape.ffnHidden, shape.dim, layers[l].up) ||
-            !readMatrix(arena, cursor, shape.dim, shape.ffnHidden, layers[l].down))
-            return false;
-    }
-
-    math::Fixed32 *const finalNorm = arena.claim<math::Fixed32>(shape.dim);
-    if (finalNorm == nullptr)
-        return false;
-    for (core::u32 i = 0u; i < shape.dim; ++i)
-        finalNorm[i] = math::Fixed32::fromRaw(static_cast<core::i32>(takeWord(cursor)));
-
-    _config = shape;
-    _vocab = table;
-    _finalNorm = ConstVectorView{finalNorm, shape.dim};
-    _layers = layers;
-    return true;
-}
-
-bool Model::openVersion2(TensorArena &arena, const core::u8 *bytes, core::u32 size)
+bool Model::openImage(TensorArena &arena, const core::u8 *bytes, core::u32 size)
 {
     const ModelImageInspection inspection = inspectModelImage(bytes, size, nullptr, 0u);
     if (inspection.verdict != ModelImageVerdict::Accepted)
@@ -530,16 +425,7 @@ bool Model::openVersion2(TensorArena &arena, const core::u8 *bytes, core::u32 si
     return true;
 }
 
-bool Model::open(TensorArena &arena, const core::u8 *bytes, core::u32 size)
-{
-    const core::u32 version = modelImageVersion(bytes, size);
-
-    if (version == kModelImageVersion1)
-        return openVersion1(arena, bytes, size);
-    if (version == kModelImageVersion2)
-        return openVersion2(arena, bytes, size);
-    return false;
-}
+bool Model::open(TensorArena &arena, const core::u8 *bytes, core::u32 size) { return openImage(arena, bytes, size); }
 
 core::u32 Model::blobBytes() const noexcept { return blobBytes(kModelImageDefaultAlignmentLog2); }
 

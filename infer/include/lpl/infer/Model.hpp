@@ -117,8 +117,8 @@ public:
      * and a @ref QuantBlock read through a misaligned pointer is undefined on the
      * target this has to run on.
      *
-     * A version 2 image (lpl/infer/ModelImage.hpp) is read through its table, each segment's signature checked
-     * before its bytes are taken; a version 1 image, its sections one after the other, is read as before.
+     * The image is a version 2 one (lpl/infer/ModelImage.hpp), read through its table, each segment's signature
+     * checked before its bytes are taken; any other version is refused.
      *
      * @param arena Storage.
      * @param bytes The image.
@@ -223,16 +223,10 @@ public:
 
 private:
     /**
-     * @brief Reads a version 1 image: the header, the vocabulary, then each section one after the other.
-     * @return false when the version, shape or extent does not hold up.
-     */
-    bool openVersion1(TensorArena &arena, const core::u8 *bytes, core::u32 size);
-
-    /**
      * @brief Reads a version 2 image through its table, each segment's signature checked first.
      * @return false when the table, a signature or a segment's content does not hold up.
      */
-    bool openVersion2(TensorArena &arena, const core::u8 *bytes, core::u32 size);
+    bool openImage(TensorArena &arena, const core::u8 *bytes, core::u32 size);
 
     ModelConfig _config{};
     Vocab _vocab{};

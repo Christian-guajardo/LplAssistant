@@ -35,9 +35,6 @@
 
 namespace lpl::infer {
 
-/** The image layout a version 1 image has: the sections one after the other, read but never written again. */
-inline constexpr core::u32 kModelImageVersion1 = 1u;
-
 /** The image layout this module writes: a header, the segment table, then the segments. */
 inline constexpr core::u32 kModelImageVersion2 = 2u;
 
@@ -112,16 +109,16 @@ struct ModelImageHeader {
  * @brief What checking a version 2 image's header and table found.
  */
 enum class ModelImageVerdict : core::u32 {
-    Accepted = 0u,            ///< The header and every entry of the table hold up.
-    TooShort = 1u,            ///< Shorter than a header, or than the header and its table.
-    BadMagic = 2u,            ///< The first word is not "LPLM".
-    NotVersion2 = 3u,         ///< Another version: a version 1 image is read by its own path.
-    BadHeader = 4u,           ///< The header's bytes, flags or reserved word are not those written.
-    BadAlignment = 5u,        ///< An alignment below 2^12 or above 2^22.
-    BadShape = 6u,            ///< An extent at 0, heads that do not divide the width, or no vocabulary text.
-    BadImageBytes = 7u,       ///< The bytes the header gives are not the image's.
-    BadSegmentCount = 8u,     ///< Not the 2L + 3 segments of a dense model of L layers.
-    SegmentUnexpected = 9u,   ///< A role, residency, layer or expert out of the table's order, or a reserved word set.
+    Accepted = 0u,          ///< The header and every entry of the table hold up.
+    TooShort = 1u,          ///< Shorter than a header, or than the header and its table.
+    BadMagic = 2u,          ///< The first word is not "LPLM".
+    NotVersion2 = 3u,       ///< Another version, version 1 included: its sections one after the other, no longer read.
+    BadHeader = 4u,         ///< The header's bytes, flags or reserved word are not those written.
+    BadAlignment = 5u,      ///< An alignment below 2^12 or above 2^22.
+    BadShape = 6u,          ///< An extent at 0, heads that do not divide the width, or no vocabulary text.
+    BadImageBytes = 7u,     ///< The bytes the header gives are not the image's.
+    BadSegmentCount = 8u,   ///< Not the 2L + 3 segments of a dense model of L layers.
+    SegmentUnexpected = 9u, ///< A role, residency, layer or expert out of the table's order, or a reserved word set.
     SegmentWrongLength = 10u, ///< A length the shape does not give that role.
     SegmentMisaligned = 11u,  ///< A resident off 64 bytes, or an expert off the image's alignment.
     SegmentOverlaps = 12u,    ///< Starts before the table or the segment before it ends.

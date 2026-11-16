@@ -7,9 +7,9 @@ what the history gives.
 
 ## [0.4.0] - 2026-11-16
 
-### Added
+### Breaking
 
-- **infer**: Write .lplmind version 2, laid out for paging: a table of segments in front, each expert on a page boundary, each segment signed (#94)
+- **infer**: Replace .lplmind version 1 with version 2, laid out for paging: a table of segments in front, each expert on a page boundary, each segment signed (#94)
 
 ## [0.3.0] - 2026-10-12
 

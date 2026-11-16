@@ -9,6 +9,7 @@ namespace {
 constexpr lpl::core::u32 kFnv1aOffsetBasis = 0x811C9DC5u;
 constexpr lpl::core::u32 kFnv1aPrime = 0x01000193u;
 constexpr lpl::core::u8 kDirtyByte = 0xA5u;
+constexpr lpl::core::u32 kRetiredVersion = 1u;
 constexpr lpl::core::u32 kParityVocabulary = 121u;
 constexpr lpl::core::u32 kMadeUpVocabularyText = 300u;
 constexpr lpl::core::u32 kParitySegments = 7u;
@@ -163,29 +164,6 @@ void putWordAt(lpl::core::u8 *bytes, lpl::core::u32 offset, lpl::core::u32 value
     for (lpl::core::u32 i = 0u; same && i < left.blobBytes(); ++i)
         same = left.blob()[i] == right.blob()[i];
     return same;
-}
-
-/**
- * @brief Appends the little-endian word @p value at @p cursor of a hand-built image.
- */
-void appendWord(lpl::core::u8 *bytes, lpl::core::u32 &cursor, lpl::core::u32 value)
-{
-    putWordAt(bytes, cursor, value);
-    cursor += 4u;
-}
-
-/**
- * @brief Appends @p rows quantised blocks of scale @p scale, lanes counting up from @p first, to a hand-built image.
- */
-void appendBlocks(lpl::core::u8 *bytes, lpl::core::u32 &cursor, lpl::core::u32 rows, lpl::core::u32 scale,
-                  lpl::core::u32 first)
-{
-    for (lpl::core::u32 row = 0u; row < rows; ++row)
-    {
-        appendWord(bytes, cursor, scale + row);
-        for (lpl::core::u32 lane = 0u; lane < lpl::infer::kQuantBlockLanes; ++lane)
-            bytes[cursor++] = static_cast<lpl::core::u8>(first + lane);
-    }
 }
 
 } // namespace
@@ -435,56 +413,27 @@ LPL_TEST(a_changed_byte_fails_its_segment_s_signature_and_the_image_does_not_ope
 }
 
 /**
- * @brief A version 1 image, built by hand from its layout rather than by the writer, still opens to the weights its
- *        bytes give, and one byte short it is refused.
- *
- * @details dim 2, 1 layer, 1 head, feed-forward 2, context 1, one token "a": 9 header words, one entry, the text padded
- *          to 4 bytes, the embedding's block, two norms, four attention matrices and gate and up of 2 rows, down of 2
- *          rows, the final norm: 612 bytes.
+ * @brief An image whose version word says 1, the sections one after the other with no table, is no longer read:
+ *        refused by name, and it does not open.
  */
-LPL_TEST(a_hand_built_version_1_image_still_opens)
+LPL_TEST(a_version_1_image_is_refused_by_name)
 {
     lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
-    lpl::core::u8 *const bytes = arena.claim<lpl::core::u8>(612u);
+    lpl::infer::Vocab vocab;
     lpl::infer::Model model;
-    lpl::infer::Model shortened;
-    lpl::core::u32 cursor = 0u;
+    lpl::infer::Model reopened;
+    lpl::infer::ModelSegment segments[kTableRoom];
+    lpl::core::u32 size = 0u;
 
-    test.check(bytes != nullptr, "room for the image");
-    if (bytes == nullptr)
+    test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
+    lpl::core::u8 *const image = writeImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, size);
+    test.check(image != nullptr, "and is written");
+    if (image == nullptr)
         return;
-    static const lpl::core::u32 header[] = {
-        lpl::infer::kModelMagic, lpl::infer::kModelImageVersion1, 2u, 1u, 1u, 2u, 1u, 1u, 1u, 0u, 1u};
-    static const lpl::core::u32 norms[] = {0x20000u, 0x20001u, 0x30000u, 0x30001u};
-    static const lpl::core::u32 finalNorm[] = {0x50000u, 0x50001u};
 
-    for (const lpl::core::u32 word : header)
-        appendWord(bytes, cursor, word);
-    appendWord(bytes, cursor, static_cast<lpl::core::u32>('a'));
-    appendBlocks(bytes, cursor, 1u, 0x10000u, 1u);
-    for (const lpl::core::u32 word : norms)
-        appendWord(bytes, cursor, word);
-    for (lpl::core::u32 matrix = 0u; matrix < 7u; ++matrix)
-        appendBlocks(bytes, cursor, 2u, 0x40000u + 0x100u * matrix, 10u * matrix);
-    for (const lpl::core::u32 word : finalNorm)
-        appendWord(bytes, cursor, word);
-
-    test.check(cursor == 612u, "the hand-built image is 612 bytes");
-    test.check(lpl::infer::modelImageVersion(bytes, 612u) == lpl::infer::kModelImageVersion1, "of version 1");
-    test.check(model.open(arena, bytes, 612u), "it opens");
-    if (!model.ready())
-        return;
-    test.check(model.config().dim == 2u && model.config().layers == 1u && model.config().ffnHidden == 2u &&
-                   model.config().vocabSize == 1u,
-               "to the shape its header gives");
-    test.check(model.embedding().blocks[0].scaleRaw == 0x10000 && model.embedding().blocks[0].lanes[31] == 32,
-               "its embedding's block, scale and last lane");
-    test.check(model.layer(0u).attentionNorm.values[1].raw() == 0x20001 &&
-                   model.layer(0u).feedForwardNorm.values[0].raw() == 0x30000,
-               "its two norms");
-    test.check(model.layer(0u).query.blocks[0].scaleRaw == 0x40000 &&
-                   model.layer(0u).down.blocks[1].scaleRaw == 0x40601 && model.layer(0u).down.blocks[1].lanes[0] == 60,
-               "its first and last matrices, in the order written");
-    test.check(model.finalNorm().values[1].raw() == 0x50001, "its final norm");
-    test.check(!shortened.open(arena, bytes, 611u), "one byte short, it is refused");
+    putWordAt(image, 4u, kRetiredVersion);
+    test.check(lpl::infer::inspectModelImage(image, size, segments, kTableRoom).verdict ==
+                   lpl::infer::ModelImageVerdict::NotVersion2,
+               "a version 1 is refused as not version 2");
+    test.check(!reopened.open(arena, image, size), "and does not open");
 }
