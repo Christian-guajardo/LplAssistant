@@ -5,6 +5,12 @@ What changed in each release, generated from the commit titles on `main`. Regene
 an edit by hand is lost at the next release, whose check refuses a file that differs from
 what the history gives.
 
+## [0.5.0] - 2026-11-17
+
+### Added
+
+- **infer**: Read a .lplmind image where it lies, the model borrowing its bytes once every segment's signature holds (#96)
+
 ## [0.4.0] - 2026-11-16
 
 ### Breaking
