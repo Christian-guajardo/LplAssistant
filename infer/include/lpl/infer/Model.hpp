@@ -65,8 +65,8 @@ enum class ModelReadVerdict : core::u32 {
  */
 struct ModelReadReport {
     ModelReadVerdict verdict{ModelReadVerdict::ImageRefused}; ///< What the reading found.
-    ModelImageVerdict image{};                                ///< The table's verdict; 0, accepted, unless refused.
-    core::u32 segment{0u};                                    ///< One-based entry refused; 0 when none is.
+    ModelImageVerdict image{}; ///< Why the table was refused; meaningful only when the verdict is ImageRefused.
+    core::u32 segment{0u};     ///< One-based entry refused; 0 when none is.
 };
 
 /** Whether this processor orders a word's bytes as an image does, which reading an image in place needs. */

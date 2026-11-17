@@ -23,6 +23,7 @@ constexpr lpl::core::u32 kVocabularyEntryLength = 4u;
 constexpr lpl::core::u32 kTinyArenaBytes = 16u;
 constexpr lpl::core::u32 kWordBytes = 4u;
 constexpr lpl::core::u32 kArenasForThreeShiftedCopies = 4u;
+constexpr lpl::core::u32 kTokenPastTheText = 2u;
 constexpr lpl::core::u32 kHeaderBytesWord = 8u;
 constexpr lpl::core::u32 kHeaderAlignmentWord = 12u;
 constexpr lpl::core::u32 kHeaderFlagsWord = 16u;
@@ -517,7 +518,9 @@ LPL_TEST(an_image_on_a_word_boundary_is_read_where_it_lies)
     const lpl::infer::ModelImageInspection inspection =
         lpl::infer::inspectModelImage(image, size, segments, kTableRoom);
     lpl::core::u64 segmentBytes = 0u;
-    for (lpl::core::u32 index = 0u; index < inspection.header.segmentCount; ++index)
+    for (lpl::core::u32 index = 0u;
+         inspection.verdict == lpl::infer::ModelImageVerdict::Accepted && index < inspection.header.segmentCount;
+         ++index)
         segmentBytes += segments[index].length;
 
     const lpl::core::usize beforeView = arena.used();
@@ -625,26 +628,42 @@ LPL_TEST(every_refusal_of_a_reading_in_place_names_what_it_refuses)
 
     const lpl::core::u32 vocabularyOffset = wordAt(image, entryAt(1u) + kEntryOffset);
     const lpl::core::u32 vocabularyLength = wordAt(image, entryAt(1u) + kEntryLength);
+    const lpl::core::u32 firstTokenOffset = wordAt(image, vocabularyOffset);
     const lpl::core::u32 firstTokenLength = wordAt(image, vocabularyOffset + kVocabularyEntryLength);
     const lpl::core::u32 signature = wordAt(image, entryAt(1u) + kEntrySignature);
-    putWordAt(image, vocabularyOffset + kVocabularyEntryLength, model.vocab().blobBytes() + 1u);
+    putWordAt(image, vocabularyOffset, model.vocab().blobBytes() - 1u);
+    putWordAt(image, vocabularyOffset + kVocabularyEntryLength, kTokenPastTheText);
     putWordAt(image, entryAt(1u) + kEntrySignature, foldBytes(image, vocabularyOffset, vocabularyLength));
     lpl::infer::Model untokened;
     const lpl::infer::ModelReadReport vocabulary = untokened.view(arena, image, size);
+    putWordAt(image, vocabularyOffset, firstTokenOffset);
     putWordAt(image, vocabularyOffset + kVocabularyEntryLength, firstTokenLength);
     putWordAt(image, entryAt(1u) + kEntrySignature, signature);
-    test.check(vocabulary.verdict == lpl::infer::ModelReadVerdict::VocabularyRefused && vocabulary.segment == 1u &&
-                   !untokened.ready(),
-               "a token past the text, its signature put right, is the vocabulary's refusal");
+    test.check(
+        vocabulary.verdict == lpl::infer::ModelReadVerdict::VocabularyRefused && vocabulary.segment == 1u &&
+            !untokened.ready(),
+        "a two-byte token starting on the text's last byte, its signature put right, is the vocabulary's refusal");
 
     lpl::infer::Model cramped;
     test.check(cramped.view(tiny, image, size).verdict == lpl::infer::ModelReadVerdict::ArenaExhausted &&
                    !cramped.ready(),
                "16 bytes of arena are exhausted by the layers' views");
 
+    lpl::infer::TensorArena tight{sizeof(lpl::infer::LayerWeights) * model.config().layers};
+    lpl::infer::Model unindexed;
+    const lpl::infer::ModelReadReport index = unindexed.view(tight, image, size);
+    test.check(index.verdict == lpl::infer::ModelReadVerdict::ArenaExhausted && index.segment == 1u &&
+                   !unindexed.ready(),
+               "an arena that holds the layers' views but not the vocabulary's index is exhausted by entry 1");
+
     lpl::infer::Model restored;
     test.check(restored.view(arena, image, size).verdict == lpl::infer::ModelReadVerdict::Read,
                "and the image, each byte put back, is read again");
+    image[inExpert] = static_cast<lpl::core::u8>(image[inExpert] ^ 0x01u);
+    test.check(restored.view(arena, image, size).verdict == lpl::infer::ModelReadVerdict::SignatureMismatch &&
+                   !restored.ready(),
+               "a model that read it, refused another image, is not ready");
+    image[inExpert] = static_cast<lpl::core::u8>(image[inExpert] ^ 0x01u);
 }
 
 /**

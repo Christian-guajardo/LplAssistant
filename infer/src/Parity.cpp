@@ -138,7 +138,7 @@ void foldMindState(MindFoldResult &out, void *memory, core::usize bytes)
     // against the derived ones is the claim: a loader that dropped a scale or
     // swapped two matrices would still produce a model that runs.
     out.blobBytes = model.blobBytes();
-    core::u32 *const imageWords = arena.claim<core::u32>(out.blobBytes / sizeof(core::u32) + 1u);
+    core::u32 *const imageWords = arena.claim<core::u32>((out.blobBytes + sizeof(core::u32) - 1u) / sizeof(core::u32));
     core::u8 *const image = reinterpret_cast<core::u8 *>(imageWords);
     if (image != nullptr && model.writeBlob(image, out.blobBytes) == out.blobBytes)
     {

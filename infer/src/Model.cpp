@@ -14,6 +14,7 @@
 
 #    include <lpl/math/Random.hpp>
 
+#    include <cstddef>
 #    include <cstdint>
 #    include <type_traits>
 
@@ -22,6 +23,8 @@ namespace lpl::infer {
 namespace {
 
 static_assert(sizeof(QuantBlock) == 4u + kQuantBlockLanes, "QuantBlock must have no padding to serialise field-wise");
+static_assert(offsetof(QuantBlock, scaleRaw) == 0u && offsetof(QuantBlock, lanes) == 4u,
+              "a block in place is its scale word, then its lanes, as the writer puts them");
 static_assert(std::is_trivially_copyable_v<QuantBlock> && std::is_trivially_copyable_v<math::Fixed32> &&
                   std::is_trivially_copyable_v<VocabEntry>,
               "a block, a Q16.16 value and a token's entry are read in place as the bytes the writer put");
@@ -532,6 +535,7 @@ bool Model::synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab
 
 ModelReadReport Model::readImage(TensorArena &arena, const core::u8 *bytes, core::u32 size, Placement placement)
 {
+    _layers = nullptr;
     const ModelImageInspection inspection = inspectModelImage(bytes, size, nullptr, 0u);
     if (inspection.verdict != ModelImageVerdict::Accepted)
         return ModelReadReport{ModelReadVerdict::ImageRefused, inspection.verdict, inspection.segment};
@@ -600,7 +604,10 @@ ModelReadReport Model::view(TensorArena &arena, const core::u8 *bytes, core::u32
 {
     const ModelReadVerdict base = judgeModelView(bytes, kHostIsLittleEndian);
     if (base != ModelReadVerdict::Read)
+    {
+        _layers = nullptr;
         return ModelReadReport{base, ModelImageVerdict::Accepted, 0u};
+    }
     return readImage(arena, bytes, size, Placement::InPlace);
 }
 
