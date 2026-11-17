@@ -44,42 +44,28 @@ core::i32 compareText(const char *lhs, core::u32 lhsLength, const char *rhs, cor
     return lhsLength < rhsLength ? -1 : 1;
 }
 
-} // namespace
-
-bool Vocab::build(TensorArena &arena, const char *blob, core::u32 blobBytes, const VocabEntry *entries,
-                  core::u32 count)
+/**
+ * @brief Fills @p order with the identifiers 0 to @p count - 1, sorted by their tokens' text.
+ *
+ * An insertion sort: the table is sorted once at load and never again, so the cost is paid before the first token,
+ * and a faster sort would be a second thing to keep deterministic for no gain the gate can see.
+ */
+void sortByText(core::u32 *order, const char *blob, const VocabEntry *entries, core::u32 count) noexcept
 {
-    if (blob == nullptr || entries == nullptr || count == 0u)
-        return false;
-
-    char *const blobCopy = arena.claim<char>(blobBytes);
-    VocabEntry *const entryCopy = arena.claim<VocabEntry>(count);
-    core::u32 *const order = arena.claim<core::u32>(count);
-    if (blobCopy == nullptr || entryCopy == nullptr || order == nullptr)
-        return false;
-
-    for (core::u32 i = 0u; i < blobBytes; ++i)
-        blobCopy[i] = blob[i];
     for (core::u32 i = 0u; i < count; ++i)
-    {
-        entryCopy[i] = entries[i];
         order[i] = i;
-    }
 
-    // Insertion sort. The table is built once at load and never again, so the cost
-    // is paid before the first token; a faster sort would be a second thing to keep
-    // deterministic for no gain the gate can see.
     for (core::u32 i = 1u; i < count; ++i)
     {
         const core::u32 candidate = order[i];
-        const char *const candidateText = blobCopy + entryCopy[candidate].offset;
-        const core::u32 candidateLength = entryCopy[candidate].length;
+        const char *const candidateText = blob + entries[candidate].offset;
+        const core::u32 candidateLength = entries[candidate].length;
 
         core::u32 j = i;
         while (j > 0u)
         {
             const core::u32 previous = order[j - 1u];
-            if (compareText(blobCopy + entryCopy[previous].offset, entryCopy[previous].length, candidateText,
+            if (compareText(blob + entries[previous].offset, entries[previous].length, candidateText,
                             candidateLength) <= 0)
                 break;
             order[j] = previous;
@@ -87,9 +73,40 @@ bool Vocab::build(TensorArena &arena, const char *blob, core::u32 blobBytes, con
         }
         order[j] = candidate;
     }
+}
 
-    _blob = blobCopy;
-    _entries = entryCopy;
+} // namespace
+
+bool Vocab::build(TensorArena &arena, const char *blob, core::u32 blobBytes, const VocabEntry *entries, core::u32 count)
+{
+    if (blob == nullptr || entries == nullptr || count == 0u)
+        return false;
+
+    char *const blobCopy = arena.claim<char>(blobBytes);
+    VocabEntry *const entryCopy = arena.claim<VocabEntry>(count);
+    if (blobCopy == nullptr || entryCopy == nullptr)
+        return false;
+
+    for (core::u32 i = 0u; i < blobBytes; ++i)
+        blobCopy[i] = blob[i];
+    for (core::u32 i = 0u; i < count; ++i)
+        entryCopy[i] = entries[i];
+    return borrow(arena, blobCopy, blobBytes, entryCopy, count);
+}
+
+bool Vocab::borrow(TensorArena &arena, const char *blob, core::u32 blobBytes, const VocabEntry *entries,
+                   core::u32 count)
+{
+    if (blob == nullptr || entries == nullptr || count == 0u)
+        return false;
+
+    core::u32 *const order = arena.claim<core::u32>(count);
+    if (order == nullptr)
+        return false;
+
+    sortByText(order, blob, entries, count);
+    _blob = blob;
+    _entries = entries;
     _sorted = order;
     _count = count;
     _blobBytes = blobBytes;
@@ -116,8 +133,7 @@ core::u32 Vocab::find(const char *bytes, core::u32 length) const noexcept
     {
         const core::u32 middle = low + (high - low) / 2u;
         const core::u32 token = _sorted[middle];
-        const core::i32 order =
-            compareText(_blob + _entries[token].offset, _entries[token].length, bytes, length);
+        const core::i32 order = compareText(_blob + _entries[token].offset, _entries[token].length, bytes, length);
         if (order == 0)
             return token;
         if (order < 0)

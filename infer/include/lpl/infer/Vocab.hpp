@@ -67,6 +67,20 @@ public:
     bool build(TensorArena &arena, const char *blob, core::u32 blobBytes, const VocabEntry *entries, core::u32 count);
 
     /**
+     * @brief Builds a table over a blob and its entries where they lie, only the sorted index in @p arena.
+     *
+     * The table borrows @p blob and @p entries: they must outlive it and must not change.
+     *
+     * @param arena     Storage for the index.
+     * @param blob      Concatenated token bytes.
+     * @param blobBytes Bytes in @p blob.
+     * @param entries   One per token, in identifier order, each inside @p blob.
+     * @param count     Tokens.
+     * @return true when the index fit.
+     */
+    bool borrow(TensorArena &arena, const char *blob, core::u32 blobBytes, const VocabEntry *entries, core::u32 count);
+
+    /**
      * @brief Tokens in the table.
      * @return The count.
      */

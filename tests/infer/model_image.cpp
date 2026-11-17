@@ -17,7 +17,12 @@ constexpr lpl::core::u32 kTableRoom = 16u;
 constexpr lpl::core::u32 kEntryRole = 0u;
 constexpr lpl::core::u32 kEntryOffset = 16u;
 constexpr lpl::core::u32 kEntryLength = 24u;
+constexpr lpl::core::u32 kEntrySignature = 32u;
 constexpr lpl::core::u32 kEntryReserved = 36u;
+constexpr lpl::core::u32 kVocabularyEntryLength = 4u;
+constexpr lpl::core::u32 kTinyArenaBytes = 16u;
+constexpr lpl::core::u32 kWordBytes = 4u;
+constexpr lpl::core::u32 kArenasForThreeShiftedCopies = 4u;
 constexpr lpl::core::u32 kHeaderBytesWord = 8u;
 constexpr lpl::core::u32 kHeaderAlignmentWord = 12u;
 constexpr lpl::core::u32 kHeaderFlagsWord = 16u;
@@ -67,6 +72,53 @@ constexpr lpl::core::u32 kHeaderReservedWord = 60u;
     for (lpl::core::u32 i = 0u; i < size; ++i)
         image[i] = kDirtyByte;
     return model.writeBlob(image, size, alignmentLog2) == size ? image : nullptr;
+}
+
+/**
+ * @brief Writes @p model's version 2 image at 4 KiB into @p arena, its first byte @p shift bytes past a word boundary.
+ * @return The image, or nullptr when the writer refused or the arena is short; @p size receives its bytes.
+ */
+[[nodiscard]] lpl::core::u8 *writeImageShiftedBy(lpl::infer::TensorArena &arena, const lpl::infer::Model &model,
+                                                 lpl::core::u32 shift, lpl::core::u32 &size)
+{
+    size = model.blobBytes();
+    lpl::core::u32 *const words = size != 0u ? arena.claim<lpl::core::u32>(size / kWordBytes + 2u) : nullptr;
+    if (words == nullptr)
+        return nullptr;
+
+    lpl::core::u8 *const image = reinterpret_cast<lpl::core::u8 *>(words) + shift;
+    return model.writeBlob(image, size) == size ? image : nullptr;
+}
+
+/**
+ * @brief Whether @p address lies inside the @p size bytes at @p image.
+ */
+[[nodiscard]] bool inside(const void *address, const lpl::core::u8 *image, lpl::core::u32 size)
+{
+    const lpl::core::u8 *const byte = static_cast<const lpl::core::u8 *>(address);
+
+    return byte >= image && byte < image + size;
+}
+
+/**
+ * @brief Whether every weight of @p model, and its vocabulary's text and entries, lie inside the @p size bytes at
+ *        @p image.
+ */
+[[nodiscard]] bool everyWeightInside(const lpl::infer::Model &model, const lpl::core::u8 *image, lpl::core::u32 size)
+{
+    bool all = inside(model.embedding().blocks, image, size) && inside(model.finalNorm().values, image, size) &&
+               inside(model.vocab().blob(), image, size) && inside(model.vocab().entries(), image, size);
+
+    for (lpl::core::u32 l = 0u; all && l < model.config().layers; ++l)
+    {
+        const lpl::infer::LayerWeights &layer = model.layer(l);
+        all = inside(layer.query.blocks, image, size) && inside(layer.key.blocks, image, size) &&
+              inside(layer.value.blocks, image, size) && inside(layer.output.blocks, image, size) &&
+              inside(layer.gate.blocks, image, size) && inside(layer.up.blocks, image, size) &&
+              inside(layer.down.blocks, image, size) && inside(layer.attentionNorm.values, image, size) &&
+              inside(layer.feedForwardNorm.values, image, size);
+    }
+    return all;
 }
 
 /**
@@ -408,6 +460,9 @@ LPL_TEST(a_changed_byte_fails_its_segment_s_signature_and_the_image_does_not_ope
                    lpl::infer::modelSegmentSignature(image, segments[5]) == segments[5].signature,
                "the second expert's signature fails, the first's holds");
     test.check(!reopened.open(arena, image, size), "the image does not open");
+    const lpl::infer::ModelReadReport copied = reopened.copy(arena, image, size);
+    test.check(copied.verdict == lpl::infer::ModelReadVerdict::SignatureMismatch && copied.segment == 7u,
+               "and its copy says why: entry 7's signature");
     image[inside] = static_cast<lpl::core::u8>(image[inside] ^ 0x01u);
     test.check(reopened.open(arena, image, size), "and opens once the byte is put back");
 }
@@ -436,4 +491,184 @@ LPL_TEST(a_version_1_image_is_refused_by_name)
                    lpl::infer::ModelImageVerdict::NotVersion2,
                "a version 1 is refused as not version 2");
     test.check(!reopened.open(arena, image, size), "and does not open");
+}
+
+/**
+ * @brief The parity model's image, its first byte on a word boundary, is read where it lies: the same weights and
+ *        tokens, every weight and the vocabulary inside the image, and the arena grows by at least every segment's
+ *        bytes less than when the same image is copied.
+ */
+LPL_TEST(an_image_on_a_word_boundary_is_read_where_it_lies)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+    lpl::infer::Model viewed;
+    lpl::infer::Model copied;
+    lpl::infer::ModelSegment segments[kTableRoom];
+    lpl::core::u32 size = 0u;
+
+    test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
+    const lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    test.check(image != nullptr, "and is written on a word boundary");
+    if (image == nullptr)
+        return;
+
+    const lpl::infer::ModelImageInspection inspection =
+        lpl::infer::inspectModelImage(image, size, segments, kTableRoom);
+    lpl::core::u64 segmentBytes = 0u;
+    for (lpl::core::u32 index = 0u; index < inspection.header.segmentCount; ++index)
+        segmentBytes += segments[index].length;
+
+    const lpl::core::usize beforeView = arena.used();
+    const lpl::infer::ModelReadReport report = viewed.view(arena, image, size);
+    const lpl::core::usize viewGrowth = arena.used() - beforeView;
+    const lpl::core::usize beforeOpen = arena.used();
+    const bool opened = copied.open(arena, image, size);
+    const lpl::core::usize openGrowth = arena.used() - beforeOpen;
+
+    test.check(report.verdict == lpl::infer::ModelReadVerdict::Read && report.segment == 0u && viewed.ready(),
+               "the image is read");
+    test.check(viewed.fold(kFnv1aOffsetBasis) == model.fold(kFnv1aOffsetBasis), "to the same weights, bit for bit");
+    test.check(sameVocabulary(viewed.vocab(), model.vocab()), "and the same tokens");
+    test.check(everyWeightInside(viewed, image, size), "every matrix, norm and token lies in the image");
+    test.check(!everyWeightInside(copied, image, size), "where a copied model's weights do not");
+    test.check(opened && segmentBytes > 0u && openGrowth >= viewGrowth + segmentBytes,
+               "reading in place claims at least every segment's bytes less than copying");
+    test.measure("segment_bytes", static_cast<lpl::core::u32>(segmentBytes));
+}
+
+/**
+ * @brief An image one, two or three bytes past a word boundary is not read in place, by name, and the model is not
+ *        ready; Model::open reads the same bytes to the same weights.
+ */
+LPL_TEST(an_image_off_a_word_boundary_is_refused_in_place_and_copied_by_open)
+{
+    lpl::infer::TensorArena arena{kArenasForThreeShiftedCopies * lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+
+    test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
+    for (lpl::core::u32 shift = 1u; shift < kWordBytes; ++shift)
+    {
+        lpl::infer::Model viewed;
+        lpl::infer::Model copied;
+        lpl::core::u32 size = 0u;
+        const lpl::core::u8 *const image = writeImageShiftedBy(arena, model, shift, size);
+        test.check(image != nullptr, "the image is written off a word boundary");
+        if (image == nullptr)
+            return;
+
+        const lpl::infer::ModelReadReport report = viewed.view(arena, image, size);
+        test.check(report.verdict == lpl::infer::ModelReadVerdict::Misaligned && !viewed.ready(),
+                   "is refused in place as misaligned");
+        test.check(copied.open(arena, image, size) && copied.fold(kFnv1aOffsetBasis) == model.fold(kFnv1aOffsetBasis),
+                   "and open copies it to the same weights");
+    }
+}
+
+/**
+ * @brief The judgement of a base: a word boundary on a little-endian host is read in place; a byte past it is
+ *        misaligned; a big-endian host reads nothing in place, aligned or not.
+ */
+LPL_TEST(a_base_is_judged_by_its_alignment_and_the_host_s_byte_order)
+{
+    alignas(4) const lpl::core::u8 bytes[8]{};
+
+    test.check(lpl::infer::judgeModelView(bytes, true) == lpl::infer::ModelReadVerdict::Read,
+               "a word boundary on a little-endian host");
+    test.check(lpl::infer::judgeModelView(bytes + 1, true) == lpl::infer::ModelReadVerdict::Misaligned &&
+                   lpl::infer::judgeModelView(bytes + 2, true) == lpl::infer::ModelReadVerdict::Misaligned &&
+                   lpl::infer::judgeModelView(bytes + 3, true) == lpl::infer::ModelReadVerdict::Misaligned,
+               "one, two or three bytes past it");
+    test.check(lpl::infer::judgeModelView(bytes, false) == lpl::infer::ModelReadVerdict::BigEndianHost &&
+                   lpl::infer::judgeModelView(bytes + 1, false) == lpl::infer::ModelReadVerdict::BigEndianHost,
+               "a big-endian host, aligned or not");
+}
+
+/**
+ * @brief Read in place, a flipped lane of the second expert fails its signature by its entry, a bad magic is the
+ *        table's refusal by its name, a token past the text whose signature was put right is the vocabulary's
+ *        refusal, and an arena too small for the layers' views is exhausted; the model is ready after none of them.
+ */
+LPL_TEST(every_refusal_of_a_reading_in_place_names_what_it_refuses)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::TensorArena tiny{kTinyArenaBytes};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+    lpl::core::u32 size = 0u;
+
+    test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
+    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    test.check(image != nullptr, "and is written on a word boundary");
+    if (image == nullptr)
+        return;
+
+    const lpl::core::u32 inExpert = wordAt(image, entryAt(7u) + kEntryOffset) + 1000u;
+    image[inExpert] = static_cast<lpl::core::u8>(image[inExpert] ^ 0x01u);
+    lpl::infer::Model flipped;
+    const lpl::infer::ModelReadReport mismatch = flipped.view(arena, image, size);
+    image[inExpert] = static_cast<lpl::core::u8>(image[inExpert] ^ 0x01u);
+    test.check(mismatch.verdict == lpl::infer::ModelReadVerdict::SignatureMismatch && mismatch.segment == 7u &&
+                   !flipped.ready(),
+               "a flipped lane of the second expert fails entry 7's signature");
+
+    const lpl::core::u32 magic = wordAt(image, 0u);
+    putWordAt(image, 0u, 0x4D4C504Du);
+    lpl::infer::Model unmarked;
+    const lpl::infer::ModelReadReport refused = unmarked.view(arena, image, size);
+    putWordAt(image, 0u, magic);
+    test.check(refused.verdict == lpl::infer::ModelReadVerdict::ImageRefused &&
+                   refused.image == lpl::infer::ModelImageVerdict::BadMagic && !unmarked.ready(),
+               "a magic not LPLM is the table's refusal, bad_magic");
+
+    const lpl::core::u32 vocabularyOffset = wordAt(image, entryAt(1u) + kEntryOffset);
+    const lpl::core::u32 vocabularyLength = wordAt(image, entryAt(1u) + kEntryLength);
+    const lpl::core::u32 firstTokenLength = wordAt(image, vocabularyOffset + kVocabularyEntryLength);
+    const lpl::core::u32 signature = wordAt(image, entryAt(1u) + kEntrySignature);
+    putWordAt(image, vocabularyOffset + kVocabularyEntryLength, model.vocab().blobBytes() + 1u);
+    putWordAt(image, entryAt(1u) + kEntrySignature, foldBytes(image, vocabularyOffset, vocabularyLength));
+    lpl::infer::Model untokened;
+    const lpl::infer::ModelReadReport vocabulary = untokened.view(arena, image, size);
+    putWordAt(image, vocabularyOffset + kVocabularyEntryLength, firstTokenLength);
+    putWordAt(image, entryAt(1u) + kEntrySignature, signature);
+    test.check(vocabulary.verdict == lpl::infer::ModelReadVerdict::VocabularyRefused && vocabulary.segment == 1u &&
+                   !untokened.ready(),
+               "a token past the text, its signature put right, is the vocabulary's refusal");
+
+    lpl::infer::Model cramped;
+    test.check(cramped.view(tiny, image, size).verdict == lpl::infer::ModelReadVerdict::ArenaExhausted &&
+                   !cramped.ready(),
+               "16 bytes of arena are exhausted by the layers' views");
+
+    lpl::infer::Model restored;
+    test.check(restored.view(arena, image, size).verdict == lpl::infer::ModelReadVerdict::Read,
+               "and the image, each byte put back, is read again");
+}
+
+/**
+ * @brief Each verdict of a reading has its own name, and a value outside them is "unknown".
+ */
+LPL_TEST(every_verdict_of_a_reading_has_its_name)
+{
+    const auto name = [](lpl::infer::ModelReadVerdict verdict) { return lpl::infer::modelReadVerdictName(verdict); };
+    const auto same = [](const char *lhs, const char *rhs) {
+        while (*lhs != '\0' && *lhs == *rhs)
+        {
+            ++lhs;
+            ++rhs;
+        }
+        return *lhs == *rhs;
+    };
+
+    test.check(same(name(lpl::infer::ModelReadVerdict::Read), "read") &&
+                   same(name(lpl::infer::ModelReadVerdict::Misaligned), "misaligned") &&
+                   same(name(lpl::infer::ModelReadVerdict::BigEndianHost), "big_endian_host") &&
+                   same(name(lpl::infer::ModelReadVerdict::ImageRefused), "image_refused") &&
+                   same(name(lpl::infer::ModelReadVerdict::SignatureMismatch), "signature_mismatch") &&
+                   same(name(lpl::infer::ModelReadVerdict::VocabularyRefused), "vocabulary_refused") &&
+                   same(name(lpl::infer::ModelReadVerdict::ArenaExhausted), "arena_exhausted"),
+               "each verdict its name");
+    test.check(same(name(static_cast<lpl::infer::ModelReadVerdict>(99u)), "unknown"), "and an unknown value");
 }

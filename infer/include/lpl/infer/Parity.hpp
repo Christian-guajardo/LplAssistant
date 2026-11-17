@@ -159,6 +159,7 @@ struct MindFoldResult {
     core::u32 forbiddenReachable{0u};   ///< 1 when the forbidden phrase could be spelled — a failure.
     core::u32 blobBytes{0u};            ///< Size of the written image. Cross-target invariant.
     core::u32 blobReopened{0u};         ///< 1 when the image read back to the same weights.
+    core::u32 blobViewed{0u};           ///< 1 when the image read where it lies has the same weights.
     core::u32 arenaBytes{0u};           ///< Bytes carved. PER-TARGET — see @ref parityArenaBytes.
 };
 

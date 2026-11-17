@@ -14,11 +14,21 @@
 
 #    include <lpl/math/Random.hpp>
 
+#    include <cstdint>
+#    include <type_traits>
+
 namespace lpl::infer {
 
 namespace {
 
 static_assert(sizeof(QuantBlock) == 4u + kQuantBlockLanes, "QuantBlock must have no padding to serialise field-wise");
+static_assert(std::is_trivially_copyable_v<QuantBlock> && std::is_trivially_copyable_v<math::Fixed32> &&
+                  std::is_trivially_copyable_v<VocabEntry>,
+              "a block, a Q16.16 value and a token's entry are read in place as the bytes the writer put");
+static_assert(sizeof(math::Fixed32) == 4u && alignof(math::Fixed32) <= kModelViewAlignment,
+              "a Q16.16 value in place is one little-endian word, aligned like a block");
+static_assert(sizeof(VocabEntry) == 8u && alignof(VocabEntry) <= kModelViewAlignment,
+              "a token's entry in place is its offset then its length, two words aligned like a block");
 
 /**
  * @brief Per-tensor stream salts.
@@ -191,17 +201,11 @@ void writeMatrix(core::u8 *&cursor, const QuantMatrixView &matrix) noexcept
 
 /**
  * @brief Reads a quantised matrix out of an image and into the arena.
- * @param arena   Storage.
- * @param cursor  Read position.
- * @param rows    Output rows.
- * @param columns Input width.
- * @param out     Receives the view.
  * @return false when the arena is exhausted.
  */
-bool readMatrix(TensorArena &arena, const core::u8 *&cursor, core::u32 rows, core::u32 columns, QuantMatrixView &out)
+bool copyMatrix(TensorArena &arena, const core::u8 *&cursor, core::u32 rows, core::u32 columns, QuantMatrixView &out)
 {
-    const core::u32 perRow = quantBlockCount(columns);
-    const core::u32 total = rows * perRow;
+    const core::u32 total = rows * quantBlockCount(columns);
     QuantBlock *const blocks = arena.claim<QuantBlock>(total);
     if (blocks == nullptr)
         return false;
@@ -215,6 +219,17 @@ bool readMatrix(TensorArena &arena, const core::u8 *&cursor, core::u32 rows, cor
 
     out = QuantMatrixView{blocks, rows, columns};
     return true;
+}
+
+/**
+ * @brief Views a quantised matrix where it lies in an image.
+ */
+void viewMatrix(const core::u8 *&cursor, core::u32 rows, core::u32 columns, QuantMatrixView &out) noexcept
+{
+    const core::usize total = static_cast<core::usize>(rows) * quantBlockCount(columns);
+
+    out = QuantMatrixView{reinterpret_cast<const QuantBlock *>(cursor), rows, columns};
+    cursor += total * sizeof(QuantBlock);
 }
 
 /**
@@ -232,7 +247,7 @@ void writeVector(core::u8 *&cursor, ConstVectorView vector) noexcept
  * @brief Reads @p count Q16.16 values out of an image and into the arena.
  * @return false when the arena is exhausted.
  */
-bool readVector(TensorArena &arena, const core::u8 *&cursor, core::u32 count, ConstVectorView &out)
+bool copyVector(TensorArena &arena, const core::u8 *&cursor, core::u32 count, ConstVectorView &out)
 {
     math::Fixed32 *const values = arena.claim<math::Fixed32>(count);
     if (values == nullptr)
@@ -244,53 +259,185 @@ bool readVector(TensorArena &arena, const core::u8 *&cursor, core::u32 count, Co
 }
 
 /**
- * @brief Reads a vocabulary of @p count entries and @p textBytes of text out of an image, every entry inside the text.
- * @return false when an entry is empty, longer than a token, past the text, or the arena is exhausted.
+ * @brief Views @p count Q16.16 values where they lie in an image.
  */
-bool readVocabulary(TensorArena &arena, const core::u8 *&cursor, core::u32 count, core::u32 textBytes, Vocab &out)
+void viewVector(const core::u8 *&cursor, core::u32 count, ConstVectorView &out) noexcept
+{
+    out = ConstVectorView{reinterpret_cast<const math::Fixed32 *>(cursor), count};
+    cursor += static_cast<core::usize>(count) * sizeof(math::Fixed32);
+}
+
+/**
+ * @brief Whether a token's entry names a non-empty run of at most a token's bytes inside @p textBytes of text.
+ */
+[[nodiscard]] bool vocabularyEntryHolds(const VocabEntry &entry, core::u32 textBytes) noexcept
+{
+    return entry.length != 0u && entry.length <= kMaxTokenBytes && entry.offset <= textBytes &&
+           entry.length <= textBytes - entry.offset;
+}
+
+/**
+ * @brief Reads a vocabulary of @p count entries and @p textBytes of text out of an image and into the arena.
+ * @return Read; VocabularyRefused when an entry does not hold; ArenaExhausted.
+ */
+ModelReadVerdict copyVocabulary(TensorArena &arena, const core::u8 *&cursor, core::u32 count, core::u32 textBytes,
+                                Vocab &out)
 {
     VocabEntry *const entries = arena.claim<VocabEntry>(count);
     char *const text = arena.claim<char>(textBytes);
     if (entries == nullptr || text == nullptr)
-        return false;
+        return ModelReadVerdict::ArenaExhausted;
 
     for (core::u32 i = 0u; i < count; ++i)
     {
         entries[i].offset = takeWord(cursor);
         entries[i].length = takeWord(cursor);
-        if (entries[i].length == 0u || entries[i].length > kMaxTokenBytes || entries[i].offset > textBytes ||
-            entries[i].length > textBytes - entries[i].offset)
-            return false;
+        if (!vocabularyEntryHolds(entries[i], textBytes))
+            return ModelReadVerdict::VocabularyRefused;
     }
     for (core::u32 i = 0u; i < textBytes; ++i)
         text[i] = static_cast<char>(cursor[i]);
     cursor += textBytes;
-    return out.build(arena, text, textBytes, entries, count);
+    return out.borrow(arena, text, textBytes, entries, count) ? ModelReadVerdict::Read :
+                                                                ModelReadVerdict::ArenaExhausted;
 }
 
 /**
- * @brief Reads a layer's attention segment: its two norms, then its query, key, value and output matrices.
- * @return false when the arena is exhausted.
+ * @brief Views a vocabulary of @p count entries and @p textBytes of text where it lies in an image, only its sorted
+ *        index in the arena.
+ * @return Read; VocabularyRefused when an entry does not hold; ArenaExhausted.
  */
-bool readAttention(TensorArena &arena, const core::u8 *&cursor, const ModelConfig &shape, LayerWeights &out)
+ModelReadVerdict viewVocabulary(TensorArena &arena, const core::u8 *cursor, core::u32 count, core::u32 textBytes,
+                                Vocab &out)
 {
-    return readVector(arena, cursor, shape.dim, out.attentionNorm) &&
-           readVector(arena, cursor, shape.dim, out.feedForwardNorm) &&
-           readMatrix(arena, cursor, shape.dim, shape.dim, out.query) &&
-           readMatrix(arena, cursor, shape.dim, shape.dim, out.key) &&
-           readMatrix(arena, cursor, shape.dim, shape.dim, out.value) &&
-           readMatrix(arena, cursor, shape.dim, shape.dim, out.output);
+    const VocabEntry *const entries = reinterpret_cast<const VocabEntry *>(cursor);
+    const char *const text =
+        reinterpret_cast<const char *>(cursor + static_cast<core::usize>(count) * sizeof(VocabEntry));
+
+    for (core::u32 i = 0u; i < count; ++i)
+    {
+        if (!vocabularyEntryHolds(entries[i], textBytes))
+            return ModelReadVerdict::VocabularyRefused;
+    }
+    return out.borrow(arena, text, textBytes, entries, count) ? ModelReadVerdict::Read :
+                                                                ModelReadVerdict::ArenaExhausted;
 }
 
 /**
- * @brief Reads a layer's expert segment: its gate, up and down matrices.
- * @return false when the arena is exhausted.
+ * @brief Reads a layer's attention segment, its two norms then its query, key, value and output matrices, into the
+ *        arena.
+ * @return Read, or ArenaExhausted.
  */
-bool readExpert(TensorArena &arena, const core::u8 *&cursor, const ModelConfig &shape, LayerWeights &out)
+ModelReadVerdict copyAttention(TensorArena &arena, const core::u8 *&cursor, const ModelConfig &shape, LayerWeights &out)
 {
-    return readMatrix(arena, cursor, shape.ffnHidden, shape.dim, out.gate) &&
-           readMatrix(arena, cursor, shape.ffnHidden, shape.dim, out.up) &&
-           readMatrix(arena, cursor, shape.dim, shape.ffnHidden, out.down);
+    const bool fit = copyVector(arena, cursor, shape.dim, out.attentionNorm) &&
+                     copyVector(arena, cursor, shape.dim, out.feedForwardNorm) &&
+                     copyMatrix(arena, cursor, shape.dim, shape.dim, out.query) &&
+                     copyMatrix(arena, cursor, shape.dim, shape.dim, out.key) &&
+                     copyMatrix(arena, cursor, shape.dim, shape.dim, out.value) &&
+                     copyMatrix(arena, cursor, shape.dim, shape.dim, out.output);
+    return fit ? ModelReadVerdict::Read : ModelReadVerdict::ArenaExhausted;
+}
+
+/**
+ * @brief Views a layer's attention segment where it lies in an image.
+ */
+void viewAttention(const core::u8 *&cursor, const ModelConfig &shape, LayerWeights &out) noexcept
+{
+    viewVector(cursor, shape.dim, out.attentionNorm);
+    viewVector(cursor, shape.dim, out.feedForwardNorm);
+    viewMatrix(cursor, shape.dim, shape.dim, out.query);
+    viewMatrix(cursor, shape.dim, shape.dim, out.key);
+    viewMatrix(cursor, shape.dim, shape.dim, out.value);
+    viewMatrix(cursor, shape.dim, shape.dim, out.output);
+}
+
+/**
+ * @brief Reads a layer's expert segment, its gate, up and down matrices, into the arena.
+ * @return Read, or ArenaExhausted.
+ */
+ModelReadVerdict copyExpert(TensorArena &arena, const core::u8 *&cursor, const ModelConfig &shape, LayerWeights &out)
+{
+    const bool fit = copyMatrix(arena, cursor, shape.ffnHidden, shape.dim, out.gate) &&
+                     copyMatrix(arena, cursor, shape.ffnHidden, shape.dim, out.up) &&
+                     copyMatrix(arena, cursor, shape.dim, shape.ffnHidden, out.down);
+    return fit ? ModelReadVerdict::Read : ModelReadVerdict::ArenaExhausted;
+}
+
+/**
+ * @brief Views a layer's expert segment where it lies in an image.
+ */
+void viewExpert(const core::u8 *&cursor, const ModelConfig &shape, LayerWeights &out) noexcept
+{
+    viewMatrix(cursor, shape.ffnHidden, shape.dim, out.gate);
+    viewMatrix(cursor, shape.ffnHidden, shape.dim, out.up);
+    viewMatrix(cursor, shape.dim, shape.ffnHidden, out.down);
+}
+
+/**
+ * @struct ImageWeights
+ * @brief What a reading has taken so far, adopted by the model once every segment is read.
+ */
+struct ImageWeights {
+    LayerWeights *layers{nullptr}; ///< One per layer, in the arena.
+    Vocab vocab{};                 ///< The token table.
+    QuantMatrixView embedding{};   ///< The tied embedding and output matrix.
+    ConstVectorView finalNorm{};   ///< The norm before the output head.
+};
+
+/**
+ * @brief Reads @p segment of a version 2 image whose header is @p header into the arena.
+ * @return Read, or what the vocabulary or the arena refused.
+ */
+ModelReadVerdict copySegment(TensorArena &arena, const core::u8 *bytes, const ModelSegment &segment,
+                             const ModelImageHeader &header, ImageWeights &weights)
+{
+    const core::u8 *cursor = bytes + segment.offset;
+    const ModelConfig &shape = header.shape;
+
+    switch (segment.role)
+    {
+    case ModelSegmentRole::Vocabulary:
+        return copyVocabulary(arena, cursor, shape.vocabSize, header.vocabTextBytes, weights.vocab);
+    case ModelSegmentRole::Embedding:
+        return copyMatrix(arena, cursor, shape.vocabSize, shape.dim, weights.embedding) ?
+                   ModelReadVerdict::Read :
+                   ModelReadVerdict::ArenaExhausted;
+    case ModelSegmentRole::Attention: return copyAttention(arena, cursor, shape, weights.layers[segment.layer - 1u]);
+    case ModelSegmentRole::FinalNorm:
+        return copyVector(arena, cursor, shape.dim, weights.finalNorm) ? ModelReadVerdict::Read :
+                                                                         ModelReadVerdict::ArenaExhausted;
+    case ModelSegmentRole::FeedForward: return copyExpert(arena, cursor, shape, weights.layers[segment.layer - 1u]);
+    }
+    return ModelReadVerdict::ImageRefused;
+}
+
+/**
+ * @brief Views @p segment of a version 2 image whose header is @p header where it lies.
+ * @return Read, or what the vocabulary or the arena refused.
+ */
+ModelReadVerdict viewSegment(TensorArena &arena, const core::u8 *bytes, const ModelSegment &segment,
+                             const ModelImageHeader &header, ImageWeights &weights)
+{
+    const core::u8 *cursor = bytes + segment.offset;
+    const ModelConfig &shape = header.shape;
+
+    switch (segment.role)
+    {
+    case ModelSegmentRole::Vocabulary:
+        return viewVocabulary(arena, cursor, shape.vocabSize, header.vocabTextBytes, weights.vocab);
+    case ModelSegmentRole::Embedding:
+        viewMatrix(cursor, shape.vocabSize, shape.dim, weights.embedding);
+        return ModelReadVerdict::Read;
+    case ModelSegmentRole::Attention:
+        viewAttention(cursor, shape, weights.layers[segment.layer - 1u]);
+        return ModelReadVerdict::Read;
+    case ModelSegmentRole::FinalNorm: viewVector(cursor, shape.dim, weights.finalNorm); return ModelReadVerdict::Read;
+    case ModelSegmentRole::FeedForward:
+        viewExpert(cursor, shape, weights.layers[segment.layer - 1u]);
+        return ModelReadVerdict::Read;
+    }
+    return ModelReadVerdict::ImageRefused;
 }
 
 /**
@@ -383,49 +530,79 @@ bool Model::synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab
     return true;
 }
 
-bool Model::openImage(TensorArena &arena, const core::u8 *bytes, core::u32 size)
+ModelReadReport Model::readImage(TensorArena &arena, const core::u8 *bytes, core::u32 size, Placement placement)
 {
     const ModelImageInspection inspection = inspectModelImage(bytes, size, nullptr, 0u);
     if (inspection.verdict != ModelImageVerdict::Accepted)
-        return false;
+        return ModelReadReport{ModelReadVerdict::ImageRefused, inspection.verdict, inspection.segment};
 
-    const ModelConfig &shape = inspection.header.shape;
-    LayerWeights *const layers = arena.claim<LayerWeights>(shape.layers);
-    Vocab table;
-    if (layers == nullptr)
-        return false;
+    ImageWeights weights{};
+    weights.layers = arena.claim<LayerWeights>(inspection.header.shape.layers);
+    if (weights.layers == nullptr)
+        return ModelReadReport{ModelReadVerdict::ArenaExhausted, ModelImageVerdict::Accepted, 0u};
 
     for (core::u32 index = 0u; index < inspection.header.segmentCount; ++index)
     {
         const ModelSegment segment = readModelSegmentEntry(bytes, index);
-        const core::u8 *cursor = bytes + segment.offset;
         if (modelSegmentSignature(bytes, segment) != segment.signature)
-            return false;
+            return ModelReadReport{ModelReadVerdict::SignatureMismatch, ModelImageVerdict::Accepted, index + 1u};
 
-        bool read = false;
-        switch (segment.role)
-        {
-        case ModelSegmentRole::Vocabulary:
-            read = readVocabulary(arena, cursor, shape.vocabSize, inspection.header.vocabTextBytes, table);
-            break;
-        case ModelSegmentRole::Embedding:
-            read = readMatrix(arena, cursor, shape.vocabSize, shape.dim, _embedding);
-            break;
-        case ModelSegmentRole::Attention: read = readAttention(arena, cursor, shape, layers[segment.layer - 1u]); break;
-        case ModelSegmentRole::FinalNorm: read = readVector(arena, cursor, shape.dim, _finalNorm); break;
-        case ModelSegmentRole::FeedForward: read = readExpert(arena, cursor, shape, layers[segment.layer - 1u]); break;
-        }
-        if (!read)
-            return false;
+        const ModelReadVerdict read = placement == Placement::InPlace ?
+                                          viewSegment(arena, bytes, segment, inspection.header, weights) :
+                                          copySegment(arena, bytes, segment, inspection.header, weights);
+        if (read != ModelReadVerdict::Read)
+            return ModelReadReport{read, ModelImageVerdict::Accepted, index + 1u};
     }
 
-    _config = shape;
-    _vocab = table;
-    _layers = layers;
-    return true;
+    _config = inspection.header.shape;
+    _vocab = weights.vocab;
+    _embedding = weights.embedding;
+    _finalNorm = weights.finalNorm;
+    _layers = weights.layers;
+    return ModelReadReport{ModelReadVerdict::Read, ModelImageVerdict::Accepted, 0u};
 }
 
-bool Model::open(TensorArena &arena, const core::u8 *bytes, core::u32 size) { return openImage(arena, bytes, size); }
+bool Model::open(TensorArena &arena, const core::u8 *bytes, core::u32 size)
+{
+    return copy(arena, bytes, size).verdict == ModelReadVerdict::Read;
+}
+
+ModelReadReport Model::copy(TensorArena &arena, const core::u8 *bytes, core::u32 size)
+{
+    return readImage(arena, bytes, size, Placement::CopyIntoArena);
+}
+
+ModelReadVerdict judgeModelView(const core::u8 *bytes, bool littleEndianHost) noexcept
+{
+    if (!littleEndianHost)
+        return ModelReadVerdict::BigEndianHost;
+    if (reinterpret_cast<std::uintptr_t>(bytes) % kModelViewAlignment != 0u)
+        return ModelReadVerdict::Misaligned;
+    return ModelReadVerdict::Read;
+}
+
+const char *modelReadVerdictName(ModelReadVerdict verdict) noexcept
+{
+    switch (verdict)
+    {
+    case ModelReadVerdict::Read: return "read";
+    case ModelReadVerdict::Misaligned: return "misaligned";
+    case ModelReadVerdict::BigEndianHost: return "big_endian_host";
+    case ModelReadVerdict::ImageRefused: return "image_refused";
+    case ModelReadVerdict::SignatureMismatch: return "signature_mismatch";
+    case ModelReadVerdict::VocabularyRefused: return "vocabulary_refused";
+    case ModelReadVerdict::ArenaExhausted: return "arena_exhausted";
+    }
+    return "unknown";
+}
+
+ModelReadReport Model::view(TensorArena &arena, const core::u8 *bytes, core::u32 size)
+{
+    const ModelReadVerdict base = judgeModelView(bytes, kHostIsLittleEndian);
+    if (base != ModelReadVerdict::Read)
+        return ModelReadReport{base, ModelImageVerdict::Accepted, 0u};
+    return readImage(arena, bytes, size, Placement::InPlace);
+}
 
 core::u32 Model::blobBytes() const noexcept { return blobBytes(kModelImageDefaultAlignmentLog2); }
 

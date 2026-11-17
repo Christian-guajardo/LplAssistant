@@ -35,10 +35,61 @@
 #        include <lpl/infer/TensorArena.hpp>
 #        include <lpl/infer/Vocab.hpp>
 
+#        include <bit>
+
 namespace lpl::infer {
 
 /// First four bytes of a `.lplmind` image, little-endian "LPLM".
 inline constexpr core::u32 kModelMagic = 0x4D4C504Cu;
+
+/** What checking an image's header and table found, defined in lpl/infer/ModelImage.hpp. */
+enum class ModelImageVerdict : core::u32;
+
+/**
+ * @enum ModelReadVerdict
+ * @brief What reading a version 2 image found.
+ */
+enum class ModelReadVerdict : core::u32 {
+    Read = 0u,              ///< Every segment read: in place by Model::view, into the arena by Model::open.
+    Misaligned = 1u,        ///< The image does not start on a multiple of kModelViewAlignment: Model::open copies it.
+    BigEndianHost = 2u,     ///< This processor orders a word's bytes the other way round: Model::open copies it.
+    ImageRefused = 3u,      ///< The header or the table does not hold up; the report's image verdict says how.
+    SignatureMismatch = 4u, ///< A segment's bytes are not the ones its entry signs.
+    VocabularyRefused = 5u, ///< A token is empty, longer than a token may be, or past the vocabulary's text.
+    ArenaExhausted = 6u,    ///< The arena cannot hold what the reading claims.
+};
+
+/**
+ * @struct ModelReadReport
+ * @brief The verdict of a reading, and what it names.
+ */
+struct ModelReadReport {
+    ModelReadVerdict verdict{ModelReadVerdict::ImageRefused}; ///< What the reading found.
+    ModelImageVerdict image{};                                ///< The table's verdict; 0, accepted, unless refused.
+    core::u32 segment{0u};                                    ///< One-based entry refused; 0 when none is.
+};
+
+/** Whether this processor orders a word's bytes as an image does, which reading an image in place needs. */
+inline constexpr bool kHostIsLittleEndian = std::endian::native == std::endian::little;
+
+/** The alignment an image's base needs to be read in place: a block's and a Q16.16 value's, 4 bytes. */
+inline constexpr core::u32 kModelViewAlignment = alignof(QuantBlock);
+
+/**
+ * @brief Whether an image whose first byte is at @p bytes can be read where it lies.
+ * @param bytes            The image's first byte; never read.
+ * @param littleEndianHost Whether this processor orders a word's bytes as the image does.
+ * @return Read; Misaligned when @p bytes is not a multiple of kModelViewAlignment; BigEndianHost on such a host.
+ */
+[[nodiscard]] ModelReadVerdict judgeModelView(const core::u8 *bytes, bool littleEndianHost) noexcept;
+
+/**
+ * @brief The name a boot line gives a reading's verdict.
+ * @param verdict A verdict.
+ * @return "read", "misaligned", "big_endian_host", "image_refused", "signature_mismatch", "vocabulary_refused" or
+ *         "arena_exhausted"; "unknown" otherwise.
+ */
+[[nodiscard]] const char *modelReadVerdictName(ModelReadVerdict verdict) noexcept;
 
 /**
  * @struct ModelConfig
@@ -110,12 +161,11 @@ public:
     bool synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab &vocab, core::u32 seed);
 
     /**
-     * @brief Reads a baked image.
+     * @brief Reads a baked image into @p arena.
      *
-     * Everything is copied into @p arena rather than pointed at in place. A boot
-     * module lands wherever the loader put it, with no guarantee about alignment,
-     * and a @ref QuantBlock read through a misaligned pointer is undefined on the
-     * target this has to run on.
+     * Everything is copied, so the caller may free the bytes afterwards and they may lie at any address: a
+     * @ref QuantBlock read through a misaligned pointer is undefined on the target this has to run on. @ref view
+     * reads an image on a word boundary where it lies instead, and @ref copy says what a refused image failed.
      *
      * The image is a version 2 one (lpl/infer/ModelImage.hpp), read through its table, each segment's signature
      * checked before its bytes are taken; any other version is refused.
@@ -126,6 +176,30 @@ public:
      * @return false when the magic, version, shape, table, a signature or an extent does not hold up.
      */
     bool open(TensorArena &arena, const core::u8 *bytes, core::u32 size);
+
+    /**
+     * @brief Reads a version 2 image into @p arena, as @ref open does, and says what it refused.
+     * @param arena Storage.
+     * @param bytes The image, at any address.
+     * @param size  Its length.
+     * @return Read; otherwise what was refused, and the model is not ready.
+     */
+    [[nodiscard]] ModelReadReport copy(TensorArena &arena, const core::u8 *bytes, core::u32 size);
+
+    /**
+     * @brief Reads a version 2 image where it lies: every matrix, norm and the vocabulary's text and entries are
+     *        viewed in @p bytes, and @p arena holds only the layers' views and the vocabulary's sorted index.
+     *
+     * The model borrows @p bytes: they must outlive it and must not change once read. Each segment's signature is
+     * checked before its bytes are taken, as by @ref open.
+     *
+     * @param arena Storage for the views and the index.
+     * @param bytes The image, its first byte on a multiple of kModelViewAlignment.
+     * @param size  Its length.
+     * @return Read; otherwise what was refused, and the model is not ready. Misaligned and BigEndianHost are left
+     *         to @ref open, which copies.
+     */
+    [[nodiscard]] ModelReadReport view(TensorArena &arena, const core::u8 *bytes, core::u32 size);
 
     /**
      * @brief Bytes @ref writeBlob would produce for this model, its experts on 4 KiB boundaries.
@@ -223,10 +297,20 @@ public:
 
 private:
     /**
-     * @brief Reads a version 2 image through its table, each segment's signature checked first.
-     * @return false when the table, a signature or a segment's content does not hold up.
+     * @enum Placement
+     * @brief Where a reading puts the weights.
      */
-    bool openImage(TensorArena &arena, const core::u8 *bytes, core::u32 size);
+    enum class Placement : core::u8 {
+        CopyIntoArena, ///< Each value decoded into the arena, as Model::open does.
+        InPlace,       ///< Each view over the image's bytes, as Model::view does.
+    };
+
+    /**
+     * @brief Reads a version 2 image through its table, each segment's signature checked first.
+     * @return Read, or what the table, a signature, the vocabulary or the arena refused.
+     */
+    [[nodiscard]] ModelReadReport readImage(TensorArena &arena, const core::u8 *bytes, core::u32 size,
+                                            Placement placement);
 
     ModelConfig _config{};
     Vocab _vocab{};
