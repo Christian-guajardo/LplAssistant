@@ -47,7 +47,7 @@ enum class ModelImageVerdict : core::u32;
 
 /**
  * @enum ModelReadVerdict
- * @brief What reading a version 2 image found.
+ * @brief What reading an image found.
  */
 enum class ModelReadVerdict : core::u32 {
     Read = 0u,              ///< Every segment read: in place by Model::view, into the arena by Model::open.
@@ -167,7 +167,7 @@ public:
      * @ref QuantBlock read through a misaligned pointer is undefined on the target this has to run on. @ref view
      * reads an image on a word boundary where it lies instead, and @ref copy says what a refused image failed.
      *
-     * The image is a version 2 one (lpl/infer/ModelImage.hpp), read through its table, each segment's signature
+     * The image is one of version 1 (lpl/infer/ModelImage.hpp), read through its table, each segment's signature
      * checked before its bytes are taken; any other version is refused.
      *
      * @param arena Storage.
@@ -178,7 +178,7 @@ public:
     bool open(TensorArena &arena, const core::u8 *bytes, core::u32 size);
 
     /**
-     * @brief Reads a version 2 image into @p arena, as @ref open does, and says what it refused.
+     * @brief Reads an image into @p arena, as @ref open does, and says what it refused.
      * @param arena Storage.
      * @param bytes The image, at any address.
      * @param size  Its length.
@@ -187,7 +187,7 @@ public:
     [[nodiscard]] ModelReadReport copy(TensorArena &arena, const core::u8 *bytes, core::u32 size);
 
     /**
-     * @brief Reads a version 2 image where it lies: every matrix, norm and the vocabulary's text and entries are
+     * @brief Reads an image where it lies: every matrix, norm and the vocabulary's text and entries are
      *        viewed in @p bytes, and @p arena holds only the layers' views and the vocabulary's sorted index.
      *
      * The model borrows @p bytes: they must outlive it and must not change once read. Each segment's signature is
@@ -216,7 +216,8 @@ public:
     [[nodiscard]] core::u32 blobBytes(core::u32 alignmentLog2) const noexcept;
 
     /**
-     * @brief Serialises this model as a version 2 image (lpl/infer/ModelImage.hpp), its experts on 4 KiB boundaries.
+     * @brief Serialises this model as an image of version 1 (lpl/infer/ModelImage.hpp), its experts on 4 KiB
+     * boundaries.
      * @param out      Receives the image.
      * @param capacity Room in @p out.
      * @return Bytes written, or 0 when the model is unbuilt or the room is short.
@@ -224,7 +225,7 @@ public:
     [[nodiscard]] core::u32 writeBlob(core::u8 *out, core::u32 capacity) const noexcept;
 
     /**
-     * @brief Serialises this model as a version 2 image, its experts on boundaries of 2^@p alignmentLog2, the
+     * @brief Serialises this model as an image of version 1, its experts on boundaries of 2^@p alignmentLog2, the
      *        padding zero.
      * @param out           Receives the image.
      * @param capacity      Room in @p out.
@@ -306,7 +307,7 @@ private:
     };
 
     /**
-     * @brief Reads a version 2 image through its table, each segment's signature checked first.
+     * @brief Reads an image through its table, each segment's signature checked first.
      * @return Read, or what the table, a signature, the vocabulary or the arena refused.
      */
     [[nodiscard]] ModelReadReport readImage(TensorArena &arena, const core::u8 *bytes, core::u32 size,
