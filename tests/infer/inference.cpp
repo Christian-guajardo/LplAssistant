@@ -208,6 +208,7 @@ LPL_TEST(the_same_seed_thinks_the_same_thought)
                "the free run produced its whole budget of tokens");
     test.check(folded.draws == folded.generated, "one sampling draw per token: the stream is not consumed elsewhere");
     test.check(folded.blobReopened == 1u, "the model written out and read back has the same weights, bit for bit");
+    test.check(folded.blobViewed == 1u, "and read where it lies, it has them too");
     test.check(folded.grammarComplete == 1u, "the constrained run spelled a whole call");
     test.check(folded.forbiddenReachable == 0u, "the grammar cannot spell the forbidden call");
     test.check(folded.arenaBytes > 0u && folded.arenaBytes < lpl::infer::parityArenaBytes(),

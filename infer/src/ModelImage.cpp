@@ -358,10 +358,12 @@ void writeModelSegmentEntry(core::u8 *image, core::u32 index, const ModelSegment
 
 core::u32 modelSegmentSignature(const core::u8 *bytes, const ModelSegment &segment) noexcept
 {
+    const core::u8 *at = bytes + segment.offset;
+    const core::u8 *const end = at + segment.length;
     core::u32 hash = kFnv1aOffsetBasis;
 
-    for (core::u64 at = segment.offset; at < segment.offset + segment.length; ++at)
-        hash = (hash ^ bytes[at]) * kFnv1aPrime;
+    while (at != end)
+        hash = (hash ^ *at++) * kFnv1aPrime;
     return hash;
 }
 

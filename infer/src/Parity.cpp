@@ -40,9 +40,9 @@ constexpr char kLastPrintable = 0x7E;
  * nothing about a byte-level acceptor crossing a token boundary — which is the only
  * hard part of constrained decoding.
  */
-const char *const kMerges[] = {"gen",  "erate", "_wor", "ld",    "place", "_ent", "ity",  "set",  "_bio",
-                               "me",   "del",   "ete",  "_every", "thing", "tool", "args", "seed", "true",
-                               "false", "null",  "\":\"", "\",\"", "{\"",  "\"}",  "00"};
+const char *const kMerges[] = {"gen",   "erate", "_wor",  "ld",     "place", "_ent", "ity",  "set",  "_bio",
+                               "me",    "del",   "ete",   "_every", "thing", "tool", "args", "seed", "true",
+                               "false", "null",  "\":\"", "\",\"",  "{\"",   "\"}",  "00"};
 
 constexpr core::u32 kMergeCount = static_cast<core::u32>(sizeof(kMerges) / sizeof(kMerges[0]));
 
@@ -138,21 +138,25 @@ void foldMindState(MindFoldResult &out, void *memory, core::usize bytes)
     // against the derived ones is the claim: a loader that dropped a scale or
     // swapped two matrices would still produce a model that runs.
     out.blobBytes = model.blobBytes();
-    core::u8 *const image = arena.claim<core::u8>(out.blobBytes);
+    core::u32 *const imageWords = arena.claim<core::u32>((out.blobBytes + sizeof(core::u32) - 1u) / sizeof(core::u32));
+    core::u8 *const image = reinterpret_cast<core::u8 *>(imageWords);
     if (image != nullptr && model.writeBlob(image, out.blobBytes) == out.blobBytes)
     {
         Model reopened;
-        if (reopened.open(arena, image, out.blobBytes) &&
-            reopened.fold(kFnv1aOffsetBasis) == out.weightSignature)
+        if (reopened.open(arena, image, out.blobBytes) && reopened.fold(kFnv1aOffsetBasis) == out.weightSignature)
             out.blobReopened = 1u;
+
+        Model viewed;
+        if (viewed.view(arena, image, out.blobBytes).verdict == ModelReadVerdict::Read &&
+            viewed.fold(kFnv1aOffsetBasis) == out.weightSignature)
+            out.blobViewed = 1u;
     }
 
     Tokenizer tokenizer{vocab};
     const char *const prompt = parityPrompt();
     core::u32 promptTokens[64];
     core::u32 skipped = 0u;
-    const core::u32 promptCount =
-        tokenizer.encode(prompt, textLength(prompt), promptTokens, 64u, skipped);
+    const core::u32 promptCount = tokenizer.encode(prompt, textLength(prompt), promptTokens, 64u, skipped);
     out.promptTokens = promptCount;
 
     core::u32 promptHash = kFnv1aOffsetBasis;
