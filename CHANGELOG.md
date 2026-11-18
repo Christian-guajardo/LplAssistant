@@ -11,7 +11,7 @@ what the history gives.
 
 - **infer**: Number the paged .lplmind layout version 1, any other version refused as unknown_version (#98)
 
-## [0.5.0] - 2026-11-17
+## [0.5.0] - 2026-11-18
 
 ### Added
 
