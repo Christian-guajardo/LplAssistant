@@ -5,6 +5,12 @@ What changed in each release, generated from the commit titles on `main`. Regene
 an edit by hand is lost at the next release, whose check refuses a file that differs from
 what the history gives.
 
+## [0.6.0] - 2026-11-18
+
+### Breaking
+
+- **infer**: Number the paged .lplmind layout version 1, any other version refused as unknown_version (#98)
+
 ## [0.5.0] - 2026-11-17
 
 ### Added
