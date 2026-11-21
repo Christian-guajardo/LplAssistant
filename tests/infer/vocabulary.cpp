@@ -26,6 +26,9 @@ constexpr lpl::core::u32 kLongTailBytes = 8u;
 constexpr lpl::core::u32 kLongLengthStride = 5u;
 constexpr lpl::core::u32 kRepeatedTokens = 64u;
 constexpr lpl::core::u32 kEmptyTokens = 1u;
+constexpr lpl::core::u32 kCombTokens = lpl::infer::kMaxTokenBytes;
+constexpr lpl::core::u32 kCombTextBytes = kCombTokens * (kCombTokens + 1u) / 2u;
+constexpr char kCombByte = '~';
 constexpr lpl::core::u32 kLongRegionBytes = lpl::infer::kMaxTokenBytes + kLongTailBytes;
 constexpr lpl::core::u8 kHighTailByte = 0xFFu;
 constexpr lpl::core::u8 kLowTailByte = 0x01u;
@@ -38,8 +41,8 @@ static_assert(sizeof(kLongHead) - 1u == lpl::infer::kMaxTokenBytes, "the long he
 constexpr lpl::core::u8 kRepeatedText[] = {0xC3u, 0xA9u, ' '};
 constexpr lpl::core::u32 kRepeatedTextBytes = sizeof(kRepeatedText);
 
-constexpr lpl::core::u32 kEdgeTextBytes = 2u * kLongRegionBytes + kRepeatedTextBytes;
-constexpr lpl::core::u32 kEdgeTokens = kLongTokens + kRepeatedTokens + kEmptyTokens;
+constexpr lpl::core::u32 kEdgeTextBytes = 2u * kLongRegionBytes + kRepeatedTextBytes + kCombTextBytes;
+constexpr lpl::core::u32 kEdgeTokens = kLongTokens + kRepeatedTokens + kEmptyTokens + kCombTokens;
 
 /** Texts no made-up vocabulary holds: a byte below every symbol, one between them, and one past every long token. */
 constexpr char kAbsentLow[] = "\x01";
@@ -154,7 +157,8 @@ lpl::core::u32 writeLongRegion(char *text, lpl::core::u32 at, lpl::core::u8 tail
 /**
  * @brief Appends the tokens no window makes, after @p windows of them: tokens past kMaxTokenBytes that share their
  *        first sixteen bytes and part from a high byte or a low one, a token repeated more times than a small sort
- *        sees at once, and an empty token.
+ *        sees at once, an empty token, and a comb of tokens that leave the long head one byte further each, so the
+ *        long tokens part from their neighbours at every one of their first kMaxTokenBytes bytes.
  */
 void addEdgeTokens(MadeUpVocabulary &vocabulary, lpl::core::u32 windows)
 {
@@ -165,6 +169,8 @@ void addEdgeTokens(MadeUpVocabulary &vocabulary, lpl::core::u32 windows)
     for (lpl::core::u32 i = 0u; i < kRepeatedTextBytes; ++i)
         vocabulary.text[repeated + i] = static_cast<char>(kRepeatedText[i]);
 
+    lpl::core::u32 comb = repeated + kRepeatedTextBytes;
+
     lpl::core::u32 token = windows;
 
     for (lpl::core::u32 k = 0u; k < kLongTokens; ++k)
@@ -172,7 +178,15 @@ void addEdgeTokens(MadeUpVocabulary &vocabulary, lpl::core::u32 windows)
             k % 2u == 0u ? high : low, lpl::infer::kMaxTokenBytes + (k * kLongLengthStride) % (kLongTailBytes + 1u)};
     for (lpl::core::u32 k = 0u; k < kRepeatedTokens; ++k)
         vocabulary.entries[token++] = lpl::infer::VocabEntry{repeated, kRepeatedTextBytes};
-    vocabulary.entries[token] = lpl::infer::VocabEntry{0u, 0u};
+    vocabulary.entries[token++] = lpl::infer::VocabEntry{0u, 0u};
+    for (lpl::core::u32 shared = 0u; shared < kCombTokens; ++shared)
+    {
+        for (lpl::core::u32 i = 0u; i < shared; ++i)
+            vocabulary.text[comb + i] = kLongHead[i];
+        vocabulary.text[comb + shared] = kCombByte;
+        vocabulary.entries[token++] = lpl::infer::VocabEntry{comb, shared + 1u};
+        comb += shared + 1u;
+    }
 }
 
 /**
