@@ -69,7 +69,11 @@ public:
     /**
      * @brief Builds a table over a blob and its entries where they lie, only the sorted index in @p arena.
      *
-     * The table borrows @p blob and @p entries: they must outlive it and must not change.
+     * The table borrows @p blob and @p entries: they must outlive it and must not change. The index orders the tokens
+     * by their bytes read as unsigned, the shorter first when one is a prefix of the other and the smaller identifier
+     * first when two are the same bytes. It is sorted in place, one identifier per token claimed and nothing else,
+     * by at most kMaxTokenBytes radix passes over the tokens, and n log n comparisons where tokens repeat or run past
+     * kMaxTokenBytes.
      *
      * @param arena     Storage for the index.
      * @param blob      Concatenated token bytes.
