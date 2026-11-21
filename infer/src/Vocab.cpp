@@ -273,11 +273,21 @@ core::u32 endOfBucket(const core::u32 *order, const TokenTexts &texts, core::u32
  * @brief The runs a pass split and left to sort, one bucket at a time, the deepest last.
  *
  * Each run waits at a depth deeper than the one under it, and only a run less than kMaxTokenBytes deep is split, so
- * kMaxTokenBytes runs are the most that ever wait.
+ * kMaxTokenBytes runs are the most that ever wait. A run past them would be written on the stack, where nothing in
+ * ring 0 sees it, so keeping one halts by name instead.
  */
 struct PendingRuns {
     IndexRange runs[kMaxTokenBytes]; ///< Buckets still to sort, grouped by their digit at the run's depth.
     core::u32 count{0u};             ///< Runs waiting.
+
+    /**
+     * @brief Keeps @p run's buckets to sort after the ones its first bucket splits into.
+     */
+    void keep(IndexRange run) noexcept
+    {
+        LPL_VERIFY(count < kMaxTokenBytes);
+        runs[count++] = run;
+    }
 
     /**
      * @brief Takes the next bucket of the deepest run still waiting, one byte deeper than that run.
@@ -321,7 +331,7 @@ void sortByText(core::u32 *order, const char *blob, const VocabEntry *entries, c
     {
         const core::u32 unsorted = sortOrSplit(order, texts, range, buckets);
         if (unsorted < range.end)
-            pending.runs[pending.count++] = IndexRange{unsorted, range.end, range.depth};
+            pending.keep(IndexRange{unsorted, range.end, range.depth});
     } while (pending.takeNextBucket(order, texts, range));
 }
 
