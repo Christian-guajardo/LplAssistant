@@ -18,7 +18,10 @@ namespace {
 /** Buckets of one radix pass: a token that has ended, then each of the 256 byte values. */
 constexpr core::u32 kRadixBuckets = 257u;
 
-/** Runs this short or shorter are sorted by comparison, where a radix pass costs more than it saves (#97). */
+/**
+ * Runs this short or shorter are sorted by comparison, where a radix pass costs more than it saves: Engineering Radix
+ * Sort (McIlroy, Bostic and McIlroy, 1993, §3) finds that thresholds from 10 to 50 work well.
+ */
 constexpr core::u32 kComparisonSortMaximum = 32u;
 
 /**

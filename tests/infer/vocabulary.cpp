@@ -325,8 +325,8 @@ void checkMadeUpVocabulary(lpl::testing::Test &test, lpl::core::u32 count, lpl::
     const LookUp lookUp = lookEveryTokenUp(vocabulary, vocab);
 
     test.check(lookUp.found == count, "every token is found by its own bytes");
-    test.check(lookUp.foundElsewhere > 0u, "some by a token of the same bytes, so equal tokens are ordered");
-    test.check(findsNoAbsentText(vocab), "and no text the vocabulary does not hold");
+    test.check(lookUp.foundElsewhere > 0u, "the vocabulary repeats tokens, so the order of equal tokens is exercised");
+    test.check(findsNoAbsentText(vocab), "and find, which compares bytes exactly, answers no text it does not hold");
     test.check(lookUp.signature == expectedSignature, "each token is found where today's order puts it");
     test.measure("tokens", count);
     test.measure("found", lookUp.found);
@@ -385,8 +385,9 @@ LPL_TEST(the_index_orders_unsigned_bytes_the_shorter_first_and_equal_tokens_by_i
 
     test.check(disagreements == 0u, "find answers every token as the search over the reference order does");
     test.check(lookUp.found == count - kEmptyTokens, "every token but the empty one is found by its own bytes");
-    test.check(lookUp.foundElsewhere > kRepeatedTokens / 2u, "the repeated ones and others by a token of theirs");
-    test.check(findsNoAbsentText(vocab), "and no text the vocabulary does not hold");
+    test.check(lookUp.foundElsewhere > kRepeatedTokens / 2u,
+               "the vocabulary repeats tokens, so the order of equal tokens is exercised");
+    test.check(findsNoAbsentText(vocab), "and find, which compares bytes exactly, answers no text it does not hold");
     test.measure("tokens", count);
     test.measure("disagreements", disagreements);
     test.measure("found_elsewhere", lookUp.foundElsewhere);
