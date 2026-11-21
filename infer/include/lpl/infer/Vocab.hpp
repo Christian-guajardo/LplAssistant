@@ -69,7 +69,10 @@ public:
     /**
      * @brief Builds a table over a blob and its entries where they lie, only the sorted index in @p arena.
      *
-     * The table borrows @p blob and @p entries: they must outlive it and must not change.
+     * The table borrows @p blob and @p entries: they must outlive it and must not change. The index orders the tokens
+     * by their bytes read as unsigned, the shorter first when one is a prefix of the other and the smaller identifier
+     * first when two are the same bytes. It claims one identifier per token and nothing else, and sorting it takes a
+     * time that grows at most as n log n with the token count, whatever order the tokens arrive in.
      *
      * @param arena     Storage for the index.
      * @param blob      Concatenated token bytes.
