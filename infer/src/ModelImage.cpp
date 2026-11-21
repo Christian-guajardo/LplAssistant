@@ -279,8 +279,8 @@ ModelImageInspection inspectModelImage(const core::u8 *bytes, core::u64 size, Mo
         return refused(ModelImageVerdict::TooShort, 0u, ModelImageHeader{});
     if (wordAt(bytes, kHeaderMagic) != kModelMagic)
         return refused(ModelImageVerdict::BadMagic, 0u, ModelImageHeader{});
-    if (wordAt(bytes, kHeaderVersion) != kModelImageVersion2)
-        return refused(ModelImageVerdict::NotVersion2, 0u, ModelImageHeader{});
+    if (wordAt(bytes, kHeaderVersion) != kModelImageVersion)
+        return refused(ModelImageVerdict::UnknownVersion, 0u, ModelImageHeader{});
 
     const ModelImageHeader header = readHeader(bytes);
     const ModelImageVerdict verdict = judgeHeader(bytes, size, header);
@@ -326,7 +326,7 @@ ModelSegment readModelSegmentEntry(const core::u8 *bytes, core::u32 index) noexc
 void writeModelImageHeader(core::u8 *image, const ModelImageHeader &header) noexcept
 {
     putWordAt(image, kHeaderMagic, kModelMagic);
-    putWordAt(image, kHeaderVersion, kModelImageVersion2);
+    putWordAt(image, kHeaderVersion, kModelImageVersion);
     putWordAt(image, kHeaderBytes, kModelImageHeaderBytes);
     putWordAt(image, kHeaderAlignment, header.alignmentLog2);
     putWordAt(image, kHeaderFlags, 0u);
@@ -374,7 +374,7 @@ const char *modelImageVerdictName(ModelImageVerdict verdict) noexcept
     case ModelImageVerdict::Accepted: return "accepted";
     case ModelImageVerdict::TooShort: return "too_short";
     case ModelImageVerdict::BadMagic: return "bad_magic";
-    case ModelImageVerdict::NotVersion2: return "not_version_2";
+    case ModelImageVerdict::UnknownVersion: return "unknown_version";
     case ModelImageVerdict::BadHeader: return "bad_header";
     case ModelImageVerdict::BadAlignment: return "bad_alignment";
     case ModelImageVerdict::BadShape: return "bad_shape";

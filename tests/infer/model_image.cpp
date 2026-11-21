@@ -9,7 +9,8 @@ namespace {
 constexpr lpl::core::u32 kFnv1aOffsetBasis = 0x811C9DC5u;
 constexpr lpl::core::u32 kFnv1aPrime = 0x01000193u;
 constexpr lpl::core::u8 kDirtyByte = 0xA5u;
-constexpr lpl::core::u32 kRetiredVersion = 1u;
+constexpr lpl::core::u32 kImageVersion = 1u;
+constexpr lpl::core::u32 kRetiredImageBytes = 256u;
 constexpr lpl::core::u32 kParityVocabulary = 121u;
 constexpr lpl::core::u32 kMadeUpVocabularyText = 300u;
 constexpr lpl::core::u32 kParitySegments = 7u;
@@ -24,6 +25,7 @@ constexpr lpl::core::u32 kTinyArenaBytes = 16u;
 constexpr lpl::core::u32 kWordBytes = 4u;
 constexpr lpl::core::u32 kArenasForThreeShiftedCopies = 4u;
 constexpr lpl::core::u32 kTokenPastTheText = 2u;
+constexpr lpl::core::u32 kHeaderVersionWord = 4u;
 constexpr lpl::core::u32 kHeaderBytesWord = 8u;
 constexpr lpl::core::u32 kHeaderAlignmentWord = 12u;
 constexpr lpl::core::u32 kHeaderFlagsWord = 16u;
@@ -59,7 +61,7 @@ constexpr lpl::core::u32 kHeaderReservedWord = 60u;
 }
 
 /**
- * @brief Writes @p model's version 2 image at @p alignmentLog2 into @p arena.
+ * @brief Writes @p model's image at @p alignmentLog2 into @p arena.
  * @return The image, or nullptr when the writer refused or the arena is short; @p size receives its bytes.
  */
 [[nodiscard]] lpl::core::u8 *writeImage(lpl::infer::TensorArena &arena, const lpl::infer::Model &model,
@@ -76,7 +78,7 @@ constexpr lpl::core::u32 kHeaderReservedWord = 60u;
 }
 
 /**
- * @brief Writes @p model's version 2 image at 4 KiB into @p arena, its first byte @p shift bytes past a word boundary.
+ * @brief Writes @p model's image at 4 KiB into @p arena, its first byte @p shift bytes past a word boundary.
  * @return The image, or nullptr when the writer refused or the arena is short; @p size receives its bytes.
  */
 [[nodiscard]] lpl::core::u8 *writeImageShiftedBy(lpl::infer::TensorArena &arena, const lpl::infer::Model &model,
@@ -179,11 +181,23 @@ void putWordAt(lpl::core::u8 *bytes, lpl::core::u32 offset, lpl::core::u32 value
 }
 
 /**
- * @brief Whether @p image, its word at @p offset set to @p value, is refused with @p verdict naming @p segment; the
- *        word is put back after.
+ * @brief Whether @p lhs and @p rhs are the same null-terminated text.
  */
-[[nodiscard]] bool refusedWith(lpl::core::u8 *image, lpl::core::u32 size, lpl::core::u32 offset, lpl::core::u32 value,
-                               lpl::infer::ModelImageVerdict verdict, lpl::core::u32 segment)
+[[nodiscard]] bool sameText(const char *lhs, const char *rhs)
+{
+    while (*lhs != '\0' && *lhs == *rhs)
+    {
+        ++lhs;
+        ++rhs;
+    }
+    return *lhs == *rhs;
+}
+
+/**
+ * @brief What checking @p image finds with its word at @p offset set to @p value; the word is put back after.
+ */
+[[nodiscard]] lpl::infer::ModelImageInspection inspectedWith(lpl::core::u8 *image, lpl::core::u32 size,
+                                                             lpl::core::u32 offset, lpl::core::u32 value)
 {
     lpl::infer::ModelSegment segments[kTableRoom];
     const lpl::core::u32 kept = wordAt(image, offset);
@@ -192,7 +206,31 @@ void putWordAt(lpl::core::u8 *bytes, lpl::core::u32 offset, lpl::core::u32 value
     const lpl::infer::ModelImageInspection inspection =
         lpl::infer::inspectModelImage(image, size, segments, kTableRoom);
     putWordAt(image, offset, kept);
+    return inspection;
+}
+
+/**
+ * @brief Whether @p image, its word at @p offset set to @p value, is refused with @p verdict naming @p segment; the
+ *        word is put back after.
+ */
+[[nodiscard]] bool refusedWith(lpl::core::u8 *image, lpl::core::u32 size, lpl::core::u32 offset, lpl::core::u32 value,
+                               lpl::infer::ModelImageVerdict verdict, lpl::core::u32 segment)
+{
+    const lpl::infer::ModelImageInspection inspection = inspectedWith(image, size, offset, value);
+
     return inspection.verdict == verdict && inspection.segment == segment;
+}
+
+/**
+ * @brief Whether @p image, its word at @p offset set to @p value, is refused at its header by the name @p verdict; the
+ *        word is put back after.
+ */
+[[nodiscard]] bool refusedByName(lpl::core::u8 *image, lpl::core::u32 size, lpl::core::u32 offset, lpl::core::u32 value,
+                                 const char *verdict)
+{
+    const lpl::infer::ModelImageInspection inspection = inspectedWith(image, size, offset, value);
+
+    return sameText(lpl::infer::modelImageVerdictName(inspection.verdict), verdict) && inspection.segment == 0u;
 }
 
 /**
@@ -286,7 +324,7 @@ LPL_TEST(an_alignment_is_kept_from_4_kib_to_4_mib_and_refused_past_them)
 }
 
 /**
- * @brief The parity model written as a version 2 image is accepted, each segment's signature holds, and it reads back
+ * @brief The parity model's image, version 1, is accepted, each segment's signature holds, and it reads back
  *        to the same weights.
  */
 LPL_TEST(a_written_image_is_accepted_and_reads_back_to_the_same_weights)
@@ -300,8 +338,8 @@ LPL_TEST(a_written_image_is_accepted_and_reads_back_to_the_same_weights)
 
     test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
     lpl::core::u8 *const image = writeImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, size);
-    test.check(image != nullptr && lpl::infer::modelImageVersion(image, size) == lpl::infer::kModelImageVersion2,
-               "it is written as a version 2 image");
+    test.check(image != nullptr && lpl::infer::modelImageVersion(image, size) == kImageVersion,
+               "it is written as version 1");
     if (image == nullptr)
         return;
 
@@ -385,7 +423,8 @@ LPL_TEST(every_corruption_of_the_header_or_the_table_is_refused_by_name)
                "an image shorter than its header");
     test.check(refusedWith(image, size, 0u, 0x4D4C504Du, lpl::infer::ModelImageVerdict::BadMagic, 0u),
                "a magic not LPLM");
-    test.check(refusedWith(image, size, 4u, 3u, lpl::infer::ModelImageVerdict::NotVersion2, 0u), "a version 3");
+    test.check(refusedWith(image, size, kHeaderVersionWord, 3u, lpl::infer::ModelImageVerdict::UnknownVersion, 0u),
+               "a version 3");
     test.check(refusedWith(image, size, kHeaderBytesWord, 60u, lpl::infer::ModelImageVerdict::BadHeader, 0u) &&
                    refusedWith(image, size, kHeaderFlagsWord, 1u, lpl::infer::ModelImageVerdict::BadHeader, 0u) &&
                    refusedWith(image, size, kHeaderReservedWord, 1u, lpl::infer::ModelImageVerdict::BadHeader, 0u),
@@ -469,16 +508,15 @@ LPL_TEST(a_changed_byte_fails_its_segment_s_signature_and_the_image_does_not_ope
 }
 
 /**
- * @brief An image whose version word says 1, the sections one after the other with no table, is no longer read:
- *        refused by name, and it does not open.
+ * @brief Only version 1 is read: the parity image with its version word at 0, at 2 as LplAssistant 0.4.0 and 0.5.0
+ *        wrote the same layout, or at 3 is refused at its header as an unknown version, and a version 2 does not open.
  */
-LPL_TEST(a_version_1_image_is_refused_by_name)
+LPL_TEST(an_image_of_another_version_is_refused_by_name)
 {
     lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
     lpl::infer::Vocab vocab;
     lpl::infer::Model model;
     lpl::infer::Model reopened;
-    lpl::infer::ModelSegment segments[kTableRoom];
     lpl::core::u32 size = 0u;
 
     test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
@@ -487,11 +525,48 @@ LPL_TEST(a_version_1_image_is_refused_by_name)
     if (image == nullptr)
         return;
 
-    putWordAt(image, 4u, kRetiredVersion);
-    test.check(lpl::infer::inspectModelImage(image, size, segments, kTableRoom).verdict ==
-                   lpl::infer::ModelImageVerdict::NotVersion2,
-               "a version 1 is refused as not version 2");
-    test.check(!reopened.open(arena, image, size), "and does not open");
+    test.check(refusedByName(image, size, kHeaderVersionWord, 0u, "unknown_version") &&
+                   refusedByName(image, size, kHeaderVersionWord, 2u, "unknown_version") &&
+                   refusedByName(image, size, kHeaderVersionWord, 3u, "unknown_version"),
+               "a version 0, 2 or 3 is refused as unknown_version");
+    putWordAt(image, kHeaderVersionWord, 2u);
+    test.check(!reopened.open(arena, image, size), "and a version 2 does not open");
+}
+
+/**
+ * @brief An image in the layout LplAssistant 0.3.0 wrote (magic, version 1, the shape, the vocabulary's text bytes,
+ *        then each section after the other) says version 1 too, and is refused all the same: its width stands where
+ *        the header gives its own size and its heads where the flags must be 0, so its header is bad whatever its
+ *        shape, and it is neither copied nor read in place.
+ */
+LPL_TEST(an_image_in_the_retired_layout_is_refused_as_a_bad_header)
+{
+    alignas(lpl::infer::kModelViewAlignment) lpl::core::u8 retired[kRetiredImageBytes]{};
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Model model;
+    const lpl::infer::ModelConfig shape = parityShape();
+    const lpl::core::u32 retiredHeader[] = {
+        lpl::infer::kModelMagic, kImageVersion,       shape.dim,       shape.layers,         shape.heads,
+        shape.ffnHidden,         shape.contextLength, shape.vocabSize, kMadeUpVocabularyText};
+    lpl::core::u32 at = 0u;
+
+    for (const lpl::core::u32 word : retiredHeader)
+    {
+        putWordAt(retired, at, word);
+        at += kWordBytes;
+    }
+    const lpl::infer::ModelImageInspection inspection =
+        lpl::infer::inspectModelImage(retired, kRetiredImageBytes, nullptr, 0u);
+    test.check(inspection.verdict == lpl::infer::ModelImageVerdict::BadHeader && inspection.segment == 0u,
+               "it is refused as a bad header");
+
+    const lpl::infer::ModelReadReport copied = model.copy(arena, retired, kRetiredImageBytes);
+    const lpl::infer::ModelReadReport viewed = model.view(arena, retired, kRetiredImageBytes);
+    test.check(copied.verdict == lpl::infer::ModelReadVerdict::ImageRefused &&
+                   copied.image == lpl::infer::ModelImageVerdict::BadHeader &&
+                   viewed.verdict == lpl::infer::ModelReadVerdict::ImageRefused &&
+                   viewed.image == lpl::infer::ModelImageVerdict::BadHeader && !model.ready(),
+               "and it is neither copied nor read in place");
 }
 
 /**
@@ -672,22 +747,14 @@ LPL_TEST(every_refusal_of_a_reading_in_place_names_what_it_refuses)
 LPL_TEST(every_verdict_of_a_reading_has_its_name)
 {
     const auto name = [](lpl::infer::ModelReadVerdict verdict) { return lpl::infer::modelReadVerdictName(verdict); };
-    const auto same = [](const char *lhs, const char *rhs) {
-        while (*lhs != '\0' && *lhs == *rhs)
-        {
-            ++lhs;
-            ++rhs;
-        }
-        return *lhs == *rhs;
-    };
 
-    test.check(same(name(lpl::infer::ModelReadVerdict::Read), "read") &&
-                   same(name(lpl::infer::ModelReadVerdict::Misaligned), "misaligned") &&
-                   same(name(lpl::infer::ModelReadVerdict::BigEndianHost), "big_endian_host") &&
-                   same(name(lpl::infer::ModelReadVerdict::ImageRefused), "image_refused") &&
-                   same(name(lpl::infer::ModelReadVerdict::SignatureMismatch), "signature_mismatch") &&
-                   same(name(lpl::infer::ModelReadVerdict::VocabularyRefused), "vocabulary_refused") &&
-                   same(name(lpl::infer::ModelReadVerdict::ArenaExhausted), "arena_exhausted"),
+    test.check(sameText(name(lpl::infer::ModelReadVerdict::Read), "read") &&
+                   sameText(name(lpl::infer::ModelReadVerdict::Misaligned), "misaligned") &&
+                   sameText(name(lpl::infer::ModelReadVerdict::BigEndianHost), "big_endian_host") &&
+                   sameText(name(lpl::infer::ModelReadVerdict::ImageRefused), "image_refused") &&
+                   sameText(name(lpl::infer::ModelReadVerdict::SignatureMismatch), "signature_mismatch") &&
+                   sameText(name(lpl::infer::ModelReadVerdict::VocabularyRefused), "vocabulary_refused") &&
+                   sameText(name(lpl::infer::ModelReadVerdict::ArenaExhausted), "arena_exhausted"),
                "each verdict its name");
-    test.check(same(name(static_cast<lpl::infer::ModelReadVerdict>(99u)), "unknown"), "and an unknown value");
+    test.check(sameText(name(static_cast<lpl::infer::ModelReadVerdict>(99u)), "unknown"), "and an unknown value");
 }

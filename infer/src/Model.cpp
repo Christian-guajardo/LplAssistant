@@ -389,7 +389,7 @@ struct ImageWeights {
 };
 
 /**
- * @brief Reads @p segment of a version 2 image whose header is @p header into the arena.
+ * @brief Reads @p segment of an image whose header is @p header into the arena.
  * @return Read, or what the vocabulary or the arena refused.
  */
 ModelReadVerdict copySegment(TensorArena &arena, const core::u8 *bytes, const ModelSegment &segment,
@@ -416,7 +416,7 @@ ModelReadVerdict copySegment(TensorArena &arena, const core::u8 *bytes, const Mo
 }
 
 /**
- * @brief Views @p segment of a version 2 image whose header is @p header where it lies.
+ * @brief Views @p segment of an image whose header is @p header where it lies.
  * @return Read, or what the vocabulary or the arena refused.
  */
 ModelReadVerdict viewSegment(TensorArena &arena, const core::u8 *bytes, const ModelSegment &segment,

@@ -1,8 +1,8 @@
 /**
  * @file ModelImage.hpp
- * @brief The layout of a `.lplmind` image of version 2, laid out for paging.
+ * @brief The layout of a `.lplmind` image, laid out for paging.
  *
- * A version 2 image opens on a header of 64 bytes and the table of its segments, so that whoever maps it reads
+ * An image opens on a header of 64 bytes and the table of its segments, so that whoever maps it reads
  * where every segment lies without touching a page that is not mapped yet. The resident segments (the
  * vocabulary, the embedding, each layer's attention and the final norm) follow the table, 64-byte aligned; each
  * expert, a layer's feed-forward matrices one after the other, starts on a boundary of the image's alignment, 4 KiB
@@ -35,10 +35,14 @@
 
 namespace lpl::infer {
 
-/** The image layout this module writes: a header, the segment table, then the segments. */
-inline constexpr core::u32 kModelImageVersion2 = 2u;
+/**
+ * The version word of the one layout read and written: a header, the segment table, then the segments. LplAssistant
+ * 0.4.0 and 0.5.0 wrote this layout as 2, a number left from the one it replaced. That retired layout said 1 too, and
+ * fails as a bad header: its width stands where this header gives its own size, and its heads where the flags are 0.
+ */
+inline constexpr core::u32 kModelImageVersion = 1u;
 
-/** Bytes of a version 2 header. */
+/** Bytes of a header. */
 inline constexpr core::u32 kModelImageHeaderBytes = 64u;
 
 /** Bytes of one entry of the segment table. */
@@ -94,7 +98,7 @@ struct ModelSegment {
 
 /**
  * @struct ModelImageHeader
- * @brief What the header of a version 2 image says.
+ * @brief What the header of an image says.
  */
 struct ModelImageHeader {
     core::u32 alignmentLog2{0u};  ///< Each expert starts on a multiple of 2^alignmentLog2.
@@ -106,19 +110,19 @@ struct ModelImageHeader {
 
 /**
  * @enum ModelImageVerdict
- * @brief What checking a version 2 image's header and table found.
+ * @brief What checking an image's header and table found.
  */
 enum class ModelImageVerdict : core::u32 {
-    Accepted = 0u,          ///< The header and every entry of the table hold up.
-    TooShort = 1u,          ///< Shorter than a header, or than the header and its table.
-    BadMagic = 2u,          ///< The first word is not "LPLM".
-    NotVersion2 = 3u,       ///< Another version, version 1 included: its sections one after the other, no longer read.
-    BadHeader = 4u,         ///< The header's bytes, flags or reserved word are not those written.
-    BadAlignment = 5u,      ///< An alignment below 2^12 or above 2^22.
-    BadShape = 6u,          ///< An extent at 0, heads that do not divide the width, or no vocabulary text.
-    BadImageBytes = 7u,     ///< The bytes the header gives are not the image's.
-    BadSegmentCount = 8u,   ///< Not the 2L + 3 segments of a dense model of L layers.
-    SegmentUnexpected = 9u, ///< A role, residency, layer or expert out of the table's order, or a reserved word set.
+    Accepted = 0u,            ///< The header and every entry of the table hold up.
+    TooShort = 1u,            ///< Shorter than a header, or than the header and its table.
+    BadMagic = 2u,            ///< The first word is not "LPLM".
+    UnknownVersion = 3u,      ///< A version word other than @ref kModelImageVersion.
+    BadHeader = 4u,           ///< The header's bytes, flags or reserved word are not those written.
+    BadAlignment = 5u,        ///< An alignment below 2^12 or above 2^22.
+    BadShape = 6u,            ///< An extent at 0, heads that do not divide the width, or no vocabulary text.
+    BadImageBytes = 7u,       ///< The bytes the header gives are not the image's.
+    BadSegmentCount = 8u,     ///< Not the 2L + 3 segments of a dense model of L layers.
+    SegmentUnexpected = 9u,   ///< A role, residency, layer or expert out of the table's order, or a reserved word set.
     SegmentWrongLength = 10u, ///< A length the shape does not give that role.
     SegmentMisaligned = 11u,  ///< A resident off 64 bytes, or an expert off the image's alignment.
     SegmentOverlaps = 12u,    ///< Starts before the table or the segment before it ends.
@@ -144,7 +148,7 @@ struct ModelImageInspection {
 [[nodiscard]] core::u64 modelMatrixImageBytes(core::u32 rows, core::u32 columns) noexcept;
 
 /**
- * @brief The segments of a dense model's version 2 image: the vocabulary, the embedding, each layer's attention, the
+ * @brief The segments of a dense model's image: the vocabulary, the embedding, each layer's attention, the
  *        final norm, then each layer's expert.
  * @param shape The transformer's extents.
  * @return 2L + 3; 0 for a shape whose count passes 32 bits.
@@ -152,7 +156,7 @@ struct ModelImageInspection {
 [[nodiscard]] core::u32 modelImageSegmentCount(const ModelConfig &shape) noexcept;
 
 /**
- * @brief Places the zero-based @p index -th segment of a dense model's version 2 image at the first offset at or past
+ * @brief Places the zero-based @p index -th segment of a dense model's image at the first offset at or past
  *        @p cursor its residency allows: 64 bytes for a resident, 2^@p alignmentLog2 for an expert.
  *
  * @param shape          The transformer's extents.
@@ -166,7 +170,7 @@ struct ModelImageInspection {
                                              core::u32 alignmentLog2, core::u32 index, core::u64 &cursor) noexcept;
 
 /**
- * @brief Places the segments of a dense model's version 2 image: the residents after the table, 64-byte aligned,
+ * @brief Places the segments of a dense model's image: the residents after the table, 64-byte aligned,
  *        then one expert per layer on boundaries of 2^@p alignmentLog2.
  *
  * @param shape          The transformer's extents.
@@ -188,7 +192,7 @@ struct ModelImageInspection {
 [[nodiscard]] core::u32 modelImageVersion(const core::u8 *bytes, core::u64 size) noexcept;
 
 /**
- * @brief Checks a version 2 image's header and table against the layout its shape gives, reading nothing past the
+ * @brief Checks an image's header and table against the layout its shape gives, reading nothing past the
  *        table: segment signatures are checked when the segments are read.
  *
  * @param bytes    The image.
@@ -201,7 +205,7 @@ struct ModelImageInspection {
                                                      core::u32 capacity) noexcept;
 
 /**
- * @brief Reads the zero-based @p index -th entry of a version 2 image's table.
+ * @brief Reads the zero-based @p index -th entry of an image's table.
  * @param bytes An image inspectModelImage accepted.
  * @param index Below its segment count.
  * @return The entry.
@@ -209,14 +213,14 @@ struct ModelImageInspection {
 [[nodiscard]] ModelSegment readModelSegmentEntry(const core::u8 *bytes, core::u32 index) noexcept;
 
 /**
- * @brief Writes the header of a version 2 image, its reserved words and flags at 0.
+ * @brief Writes the header of an image, its reserved words and flags at 0.
  * @param image  Room for the header at least.
  * @param header What it says.
  */
 void writeModelImageHeader(core::u8 *image, const ModelImageHeader &header) noexcept;
 
 /**
- * @brief Writes the zero-based @p index -th entry of a version 2 image's table, its reserved word at 0.
+ * @brief Writes the zero-based @p index -th entry of an image's table, its reserved word at 0.
  * @param image   Room for the header and the table at least.
  * @param index   The entry's place.
  * @param segment What it says.
@@ -234,7 +238,7 @@ void writeModelSegmentEntry(core::u8 *image, core::u32 index, const ModelSegment
 /**
  * @brief The name a boot line gives a verdict.
  * @param verdict A verdict.
- * @return "accepted", "too_short", "bad_magic", "not_version_2", "bad_header", "bad_alignment", "bad_shape",
+ * @return "accepted", "too_short", "bad_magic", "unknown_version", "bad_header", "bad_alignment", "bad_shape",
  *         "bad_image_bytes", "bad_segment_count", "segment_unexpected", "segment_wrong_length",
  *         "segment_misaligned", "segment_overlaps" or "segment_outside"; "unknown" otherwise.
  */
