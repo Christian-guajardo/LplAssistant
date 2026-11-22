@@ -361,6 +361,7 @@ LPL_TEST(the_index_orders_unsigned_bytes_the_shorter_first_and_equal_tokens_by_i
     referenceOrder(vocabulary, order);
 
     const lpl::core::usize before = arena.used();
+    const lpl::core::u32 fallbacksBefore = lpl::infer::vocabularySortFallbacks();
     const bool borrowed =
         vocab.borrow(arena, vocabulary.text, vocabulary.textBytes, vocabulary.entries, vocabulary.count);
     const lpl::core::usize growth = arena.used() - before;
@@ -369,6 +370,8 @@ LPL_TEST(the_index_orders_unsigned_bytes_the_shorter_first_and_equal_tokens_by_i
         return;
     test.check(growth >= count * sizeof(lpl::core::u32) && growth < (count + 1u) * sizeof(lpl::core::u32),
                "which claims one identifier per token and nothing more");
+    test.check(lpl::infer::vocabularySortFallbacks() == fallbacksBefore,
+               "and its sort keeps every run it splits within its bound, none falling back");
 
     lpl::core::u32 disagreements = 0u;
 
@@ -416,4 +419,49 @@ LPL_TEST(ten_thousand_made_up_tokens_are_found_where_today_s_order_puts_them)
 LPL_TEST(a_hundred_thousand_made_up_tokens_are_found_where_today_s_order_puts_them)
 {
     checkMadeUpVocabulary(test, kAHundredThousand, kAHundredThousandSignature);
+}
+
+/**
+ * @brief An index sort with room for one waiting run, where the edge vocabulary needs more, finishes the runs it cannot
+ *        keep by comparing, counts each, and gives the order worked apart; with room for every run it counts none.
+ */
+LPL_TEST(a_sort_without_room_for_its_waiting_runs_compares_them_and_counts_each)
+{
+    const lpl::core::u32 count = kOrderedWindows + kEdgeTokens;
+    const lpl::core::u32 textBytes = kOrderedWindows + lpl::infer::kMaxTokenBytes + kEdgeTextBytes;
+    lpl::infer::TensorArena arena{madeUpArenaBytes(count, textBytes) + 3u * count * sizeof(lpl::core::u32)};
+    MadeUpVocabulary vocabulary{};
+
+    if (!test.check(makeUpWindows(arena, kOrderedWindows, kEdgeTokens, kEdgeTextBytes, vocabulary),
+                    "the made-up vocabulary fits its arena"))
+        return;
+    addEdgeTokens(vocabulary, kOrderedWindows);
+
+    lpl::core::u32 *const reference = arena.claim<lpl::core::u32>(count);
+    lpl::core::u32 *const roomy = arena.claim<lpl::core::u32>(count);
+    lpl::core::u32 *const cramped = arena.claim<lpl::core::u32>(count);
+    if (!test.check(reference != nullptr && roomy != nullptr && cramped != nullptr, "and so do three orders"))
+        return;
+    referenceOrder(vocabulary, reference);
+
+    const lpl::core::u32 countedBefore = lpl::infer::vocabularySortFallbacks();
+    const lpl::core::u32 roomyFallbacks =
+        lpl::infer::sortVocabularyIndex(roomy, vocabulary.text, vocabulary.entries, count);
+    const lpl::core::u32 crampedFallbacks =
+        lpl::infer::sortVocabularyIndex(cramped, vocabulary.text, vocabulary.entries, count, 1u);
+    bool roomyAsReference = true;
+    bool crampedAsReference = true;
+
+    for (lpl::core::u32 rank = 0u; rank < count; ++rank)
+    {
+        roomyAsReference = roomyAsReference && roomy[rank] == reference[rank];
+        crampedAsReference = crampedAsReference && cramped[rank] == reference[rank];
+    }
+
+    test.check(roomyFallbacks == 0u && roomyAsReference,
+               "with room for every run, none falls back and the order is the reference");
+    test.check(crampedFallbacks >= 1u, "with room for one, the runs it cannot keep fall back");
+    test.check(crampedAsReference, "and the order is still the reference");
+    test.check(lpl::infer::vocabularySortFallbacks() == countedBefore + crampedFallbacks, "each fallback is counted");
+    test.measure("fallbacks_with_room_for_one", crampedFallbacks);
 }
