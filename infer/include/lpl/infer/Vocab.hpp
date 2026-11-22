@@ -44,6 +44,30 @@ struct VocabEntry {
 };
 
 /**
+ * @brief Sorts @p order, filled with the identifiers 0 to @p count - 1, by their tokens' text, the smaller identifier
+ *        first when two texts are the same, keeping at most @p pendingRunRoom runs waiting at once.
+ *
+ * A run that finds no room left to wait is finished at once by comparing its tokens: slower, never in another order.
+ * Each one is counted in @ref vocabularySortFallbacks. Vocab::build and Vocab::borrow leave room for kMaxTokenBytes
+ * runs, the most a run's depth allows, so they fall back only if that bound breaks.
+ *
+ * @param order          Receives the sorted identifiers; @p count of them.
+ * @param blob           The tokens' concatenated bytes.
+ * @param entries        One per token, in identifier order, each inside @p blob.
+ * @param count          Tokens.
+ * @param pendingRunRoom Runs that may wait at once, kMaxTokenBytes at most.
+ * @return The runs finished by comparing for want of room.
+ */
+core::u32 sortVocabularyIndex(core::u32 *order, const char *blob, const VocabEntry *entries, core::u32 count,
+                              core::u32 pendingRunRoom = kMaxTokenBytes) noexcept;
+
+/**
+ * @brief The runs every index sort since the start finished by comparing for want of room.
+ * @return 0 while the sort's bound on waiting runs holds; anything else says it broke, the order still exact.
+ */
+[[nodiscard]] core::u32 vocabularySortFallbacks() noexcept;
+
+/**
  * @class Vocab
  * @brief An immutable token table over arena storage.
  */

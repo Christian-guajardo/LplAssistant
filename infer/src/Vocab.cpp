@@ -273,20 +273,24 @@ core::u32 endOfBucket(const core::u32 *order, const TokenTexts &texts, core::u32
  * @brief The runs a pass split and left to sort, one bucket at a time, the deepest last.
  *
  * Each run waits at a depth deeper than the one under it, and only a run less than kMaxTokenBytes deep is split, so
- * kMaxTokenBytes runs are the most that ever wait. A run past them would be written on the stack, where nothing in
- * ring 0 sees it, so keeping one halts by name instead.
+ * kMaxTokenBytes runs are the most that ever wait. A run past the room is refused rather than written past the array,
+ * where nothing in ring 0 would see it, and its caller finishes it another way.
  */
 struct PendingRuns {
     IndexRange runs[kMaxTokenBytes]; ///< Buckets still to sort, grouped by their digit at the run's depth.
     core::u32 count{0u};             ///< Runs waiting.
+    core::u32 room{kMaxTokenBytes};  ///< Runs that may wait at once, kMaxTokenBytes at most.
 
     /**
      * @brief Keeps @p run's buckets to sort after the ones its first bucket splits into.
+     * @return false, keeping nothing, when no room is left.
      */
-    void keep(IndexRange run) noexcept
+    [[nodiscard]] bool keep(IndexRange run) noexcept
     {
-        LPL_VERIFY(count < kMaxTokenBytes);
+        if (count >= room)
+            return false;
         runs[count++] = run;
+        return true;
     }
 
     /**
@@ -316,9 +320,12 @@ struct PendingRuns {
  * enough to compare, holds tokens that ended together, or reaches kMaxTokenBytes, and comparing finishes it. A tie
  * goes to the smaller identifier by that comparison, never by the order a pass left, so the order is a total one, no
  * pass needs to be stable, and no scratch copy of the index is claimed. The stack holds the buckets, 2 KiB, and at
- * most kMaxTokenBytes pending runs.
+ * most kMaxTokenBytes pending runs; a run with no room left to wait is finished by comparing at once.
+ *
+ * @return The runs finished by comparing for want of room.
  */
-void sortByText(core::u32 *order, const char *blob, const VocabEntry *entries, core::u32 count) noexcept
+core::u32 sortByText(core::u32 *order, const char *blob, const VocabEntry *entries, core::u32 count,
+                     core::u32 pendingRunRoom) noexcept
 {
     for (core::u32 i = 0u; i < count; ++i)
         order[i] = i;
@@ -326,16 +333,35 @@ void sortByText(core::u32 *order, const char *blob, const VocabEntry *entries, c
     const TokenTexts texts{blob, entries};
     RadixBuckets buckets;
     PendingRuns pending;
+    pending.room = pendingRunRoom < kMaxTokenBytes ? pendingRunRoom : kMaxTokenBytes;
+    core::u32 fallbacks = 0u;
     IndexRange range{0u, count, 0u};
     do
     {
         const core::u32 unsorted = sortOrSplit(order, texts, range, buckets);
-        if (unsorted < range.end)
-            pending.keep(IndexRange{unsorted, range.end, range.depth});
+        const IndexRange rest{unsorted, range.end, range.depth};
+        if (unsorted < range.end && !pending.keep(rest))
+        {
+            comparisonSort(order, texts, rest);
+            ++fallbacks;
+        }
     } while (pending.takeNextBucket(order, texts, range));
+    return fallbacks;
 }
 
+core::u32 gVocabularySortFallbacks = 0u;
+
 } // namespace
+
+core::u32 sortVocabularyIndex(core::u32 *order, const char *blob, const VocabEntry *entries, core::u32 count,
+                              core::u32 pendingRunRoom) noexcept
+{
+    const core::u32 fallbacks = sortByText(order, blob, entries, count, pendingRunRoom);
+    gVocabularySortFallbacks += fallbacks;
+    return fallbacks;
+}
+
+core::u32 vocabularySortFallbacks() noexcept { return gVocabularySortFallbacks; }
 
 bool Vocab::build(TensorArena &arena, const char *blob, core::u32 blobBytes, const VocabEntry *entries, core::u32 count)
 {
@@ -364,7 +390,7 @@ bool Vocab::borrow(TensorArena &arena, const char *blob, core::u32 blobBytes, co
     if (order == nullptr)
         return false;
 
-    sortByText(order, blob, entries, count);
+    (void) sortVocabularyIndex(order, blob, entries, count);
     _blob = blob;
     _entries = entries;
     _sorted = order;
