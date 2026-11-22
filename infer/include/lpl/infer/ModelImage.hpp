@@ -40,7 +40,7 @@ namespace lpl::infer {
  * The version word of the one layout read and written: a header, the segment table, then the segments. LplAssistant
  * 0.4.0 and 0.5.0 wrote this layout as 2, a number left from the one it replaced. That retired layout said 1 too, and
  * fails as a bad header: its width stands where this header gives its own size, and its heads where the flags are 0.
- * An image of LplAssistant 0.6.2 or older holds no rotary table, 2L + 3 segments, and fails as a bad segment count.
+ * An image of LplAssistant 0.6.0 to 0.6.2 holds no rotary table, 2L + 3 segments, and fails as a bad segment count.
  */
 inline constexpr core::u32 kModelImageVersion = 1u;
 

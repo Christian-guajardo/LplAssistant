@@ -161,7 +161,8 @@ void rmsNorm(ConstVectorView input, ConstVectorView gain, core::u32 epsilon, Vec
 void applyRotaryEmbedding(VectorView vector, core::u32 heads, core::u32 headDim, RotaryFrequencies frequencies,
                           core::u32 position) noexcept
 {
-    LPL_VERIFY(vector.count == heads * headDim && frequencies.pairs == headDim / 2u);
+    LPL_VERIFY(vector.count == heads * headDim);
+    LPL_VERIFY(frequencies.pairs == headDim / 2u);
 
     for (core::u32 pair = 0u; pair < frequencies.pairs; ++pair)
     {

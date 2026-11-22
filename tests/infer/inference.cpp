@@ -19,9 +19,9 @@ constexpr lpl::core::u32 kOneRadianTurn = 683565276u;  ///< One radian, 2^32 / (
 constexpr lpl::core::u32 kHalfRadianTurn = 341782638u; ///< Half a radian, 2^31 / (2 pi) rounded, the seed's pair 1.
 constexpr lpl::core::u32 kPositionPastTheOldOverflow = 1u << 20; ///< Past 32768, where the angle in Q16.16 overflowed.
 constexpr lpl::core::u32 kRotaryRoom = 8u;                       ///< Values the rotation tests turn at most.
-constexpr lpl::core::i64 kCordicRawUnits = 16; ///< CORDIC's error, the angle floored included: at most 14.7 raw units.
-constexpr lpl::core::u32 kParityPairs = 6u;    ///< The parity model's heads of 12 channels hold 6 pairs.
-constexpr lpl::core::u32 kWideHeadPairs = 36u; ///< A head of 72 channels holds 36 pairs.
+constexpr lpl::core::i64 kCordicRawUnits = 16;    ///< CORDIC's error against an expected value rounded to a unit.
+constexpr lpl::core::u32 kParityPairs = 6u;       ///< The parity model's heads of 12 channels hold 6 pairs.
+constexpr lpl::core::u32 kWideHeadPairs = 36u;    ///< A head of 72 channels holds 36 pairs.
 constexpr lpl::core::u32 kWideHeadChannels = 72u; ///< One head that wide.
 
 /**
@@ -338,9 +338,10 @@ LPL_TEST(a_shared_rotation_keeps_the_dot_product)
  *        (1, 0) to (0, 1), and an eighth to (0.70711, 0.70711).
  *
  * @details Expected values in double precision, apart from the code: 65536 times the cosine and the sine of 2 pi / 4,
- *          0 and 65536, and of 2 pi / 8, 46340.95 twice. Within kCordicRawUnits: CORDIC's sixteen steps and the angle
- *          floored to a raw unit err by at most 14.7 raw units over 16384 angles spread over a turn, against double
- *          precision, and by 4 here.
+ *          0 and 65536, and of 2 pi / 8, 46340.95 twice. Within kCordicRawUnits: over every raw angle, at both ends of
+ *          the turns that floor to it, CORDIC's sixteen steps and the angle floored to a raw unit err by at most 16.37
+ *          raw units against the exact value in double precision, and by at most 16 against it rounded to a unit; by 4
+ *          here.
  */
 LPL_TEST(each_pair_turns_by_its_own_frequency_in_every_head)
 {
@@ -365,16 +366,23 @@ LPL_TEST(each_pair_turns_by_its_own_frequency_in_every_head)
  *          rad, whose cosine and sine are -51103.52 and -41029.23 raw units. For one radian per position rounded, f =
  *          683565276, it is 220 / 4096 = 0.0537109375 of a turn, 0.337475773 rad: 61839.34 and 21699.38 raw units. That
  *          angle is 0.00065 rad from 2^20 rad modulo 2 pi, which is the entry's rounding, 0.42 of 2^-32 turn, times the
- *          position: the arithmetic adds no error to the frequency it is given.
+ *          position: the arithmetic adds no error to the frequency it is given. Both angles are whole multiples of
+ * 2^-12 turn, so one position further, at 2^20 + 1, 0x9E3779B9 turns by 0x39C779B9 units, whose low 20 bits
+ * count: 1.418114951 rad, whose cosine and sine are 9967.30 and 64773.61 raw units, where 0x39C00000 alone would give
+ * 10013.72.
  */
 LPL_TEST(a_position_past_32768_turns_by_its_frequency_times_the_position_modulo_a_turn)
 {
     const lpl::core::u32 turns[2] = {kGoldenTurn, kOneRadianTurn};
     lpl::math::Fixed32 values[kRotaryRoom] = {};
+    lpl::math::Fixed32 further[kRotaryRoom] = {};
 
     turnUnitPairs(turns, 2u, 1u, kPositionPastTheOldOverflow, values);
+    turnUnitPairs(turns, 1u, 1u, kPositionPastTheOldOverflow + 1u, further);
     test.check(pairTurnedTo(values, 0u, -51104, -41029), "0x9E3779B9 turns (1, 0) to (-0.77978, -0.62606) at 2^20");
     test.check(pairTurnedTo(values, 1u, 61839, 21699), "one radian per position turns it to (0.94359, 0.33111)");
+    test.check(pairTurnedTo(further, 0u, 9967, 64774),
+               "and 0x9E3779B9 turns it to (0.15209, 0.98837) at 2^20 + 1, to the last bit of the turn");
     test.measure("golden_cosine_raw", values[0].raw());
     test.measure("one_radian_sine_raw", values[3].raw());
 }
