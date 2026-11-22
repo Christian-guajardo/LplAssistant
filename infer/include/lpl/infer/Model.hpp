@@ -102,6 +102,7 @@ struct ModelConfig {
     core::u32 ffnHidden{0u};     ///< Width inside the position-wise network.
     core::u32 contextLength{0u}; ///< Positions the cache can hold.
     core::u32 vocabSize{0u};     ///< Tokens; must equal the bound vocabulary's size.
+    core::u32 normEpsilon{0u};   ///< Added to the mean of the squares before its root, in units of 2^-32; 0 adds none.
 
     /**
      * @brief Width of one attention head.

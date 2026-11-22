@@ -36,7 +36,7 @@ constexpr core::u32 kHeaderFeedForward = 44u;
 constexpr core::u32 kHeaderContext = 48u;
 constexpr core::u32 kHeaderVocabSize = 52u;
 constexpr core::u32 kHeaderVocabText = 56u;
-constexpr core::u32 kHeaderReserved = 60u;
+constexpr core::u32 kHeaderNormEpsilon = 60u;
 /** @} */
 
 /**
@@ -171,6 +171,7 @@ ModelImageHeader readHeader(const core::u8 *bytes) noexcept
     header.shape.contextLength = wordAt(bytes, kHeaderContext);
     header.shape.vocabSize = wordAt(bytes, kHeaderVocabSize);
     header.vocabTextBytes = wordAt(bytes, kHeaderVocabText);
+    header.shape.normEpsilon = wordAt(bytes, kHeaderNormEpsilon);
     return header;
 }
 
@@ -179,8 +180,7 @@ ModelImageHeader readHeader(const core::u8 *bytes) noexcept
  */
 ModelImageVerdict judgeHeader(const core::u8 *bytes, core::u64 size, const ModelImageHeader &header) noexcept
 {
-    if (wordAt(bytes, kHeaderBytes) != kModelImageHeaderBytes || wordAt(bytes, kHeaderFlags) != 0u ||
-        wordAt(bytes, kHeaderReserved) != 0u)
+    if (wordAt(bytes, kHeaderBytes) != kModelImageHeaderBytes || wordAt(bytes, kHeaderFlags) != 0u)
         return ModelImageVerdict::BadHeader;
     if (!alignmentAccepted(header.alignmentLog2))
         return ModelImageVerdict::BadAlignment;
@@ -339,7 +339,7 @@ void writeModelImageHeader(core::u8 *image, const ModelImageHeader &header) noex
     putWordAt(image, kHeaderContext, header.shape.contextLength);
     putWordAt(image, kHeaderVocabSize, header.shape.vocabSize);
     putWordAt(image, kHeaderVocabText, header.vocabTextBytes);
-    putWordAt(image, kHeaderReserved, 0u);
+    putWordAt(image, kHeaderNormEpsilon, header.shape.normEpsilon);
 }
 
 void writeModelSegmentEntry(core::u8 *image, core::u32 index, const ModelSegment &segment) noexcept

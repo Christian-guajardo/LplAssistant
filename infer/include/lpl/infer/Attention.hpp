@@ -38,15 +38,18 @@ namespace lpl::infer {
 /**
  * @brief Root-mean-square normalisation with per-channel gains.
  *
- * The sum of squares accumulates in 64 bits at Q32 and is only narrowed once, at the
- * root. Narrowing each term first would lose every value below a raw unit — which,
- * on a residual stream whose entries are fractions, is most of them.
+ * The sum of squares accumulates exactly, in units of 2^-32, and is never narrowed. Its root is
+ * taken with as many fraction bits as 62 bits of radicand leave, so a small root mean square is
+ * not rounded to a few raw units before each value is divided by it. Narrowing first would lose
+ * every value below a raw unit — which, on a residual stream whose entries are fractions, is
+ * most of them — and would wrap once the root mean square passed 181. Vectors up to 2^30 values.
  *
- * @param input Values to normalise.
- * @param gain  Per-channel multipliers; same length as @p input.
- * @param out   Receives the result; may alias @p input.
+ * @param input   Values to normalise.
+ * @param gain    Per-channel multipliers; same length as @p input.
+ * @param epsilon Added to the mean of the squares before its root, in units of 2^-32 (ModelConfig::normEpsilon).
+ * @param out     Receives the result; may alias @p input.
  */
-void rmsNorm(ConstVectorView input, ConstVectorView gain, VectorView out) noexcept;
+void rmsNorm(ConstVectorView input, ConstVectorView gain, core::u32 epsilon, VectorView out) noexcept;
 
 /**
  * @brief Rotates each head's channel pairs by an angle proportional to @p position.

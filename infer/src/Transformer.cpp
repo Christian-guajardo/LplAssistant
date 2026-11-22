@@ -69,7 +69,7 @@ bool Transformer::forward(core::u32 token, core::u32 position, KvCache &cache, V
 
     // The output head is the embedding table read the other way round. One matrix,
     // two directions — so a token's representation and its score cannot disagree.
-    rmsNorm(_residual, _model->finalNorm(), _normed);
+    rmsNorm(_residual, _model->finalNorm(), shape.normEpsilon, _normed);
     quantiseRow(_normed.values, _normed.count, _blocks);
     quantisedMatVecPrepared(_model->embedding(), _blocks, outLogits);
     return true;

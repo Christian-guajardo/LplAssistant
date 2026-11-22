@@ -10,6 +10,8 @@ LPL_TEST_SUITE(inference);
 namespace {
 
 constexpr lpl::core::u32 kFnv1aOffsetBasis = 0x811C9DC5u;
+constexpr lpl::core::u32 kWideNormValues = 64u;
+constexpr lpl::core::u32 kEpsilonOneInHundredThousand = 42950u; ///< 1e-5 in units of 2^-32, rounded.
 
 [[nodiscard]] lpl::core::u32 textLength(const char *text)
 {
@@ -28,6 +30,32 @@ constexpr lpl::core::u32 kFnv1aOffsetBasis = 0x811C9DC5u;
     for (lpl::core::u32 index = 0u; index < count; ++index)
         total += (static_cast<lpl::core::i64>(lhs[index].raw()) * rhs[index].raw()) >> 16;
     return lpl::math::Fixed32::fromRaw(static_cast<lpl::core::i32>(total));
+}
+
+/**
+ * @brief Normalises @p count values of raw Q16.16 @p raws, each gain one, with @p epsilon, into @p out.
+ */
+void normaliseRaw(const lpl::core::i32 *raws, lpl::core::u32 count, lpl::core::u32 epsilon, lpl::math::Fixed32 *out)
+{
+    lpl::math::Fixed32 values[kWideNormValues] = {};
+    lpl::math::Fixed32 gains[kWideNormValues] = {};
+
+    for (lpl::core::u32 index = 0u; index < count; ++index)
+    {
+        values[index] = lpl::math::Fixed32::fromRaw(raws[index]);
+        gains[index] = lpl::math::Fixed32::one();
+    }
+    lpl::infer::rmsNorm(lpl::infer::ConstVectorView{values, count}, lpl::infer::ConstVectorView{gains, count}, epsilon,
+                        lpl::infer::VectorView{out, count});
+}
+
+/**
+ * @brief Whether @p value lies within @p units raw units of @p expectedRaw.
+ */
+[[nodiscard]] bool withinRawUnits(lpl::math::Fixed32 value, lpl::core::i64 expectedRaw, lpl::core::i64 units)
+{
+    const lpl::core::i64 gap = static_cast<lpl::core::i64>(value.raw()) - expectedRaw;
+    return gap <= units && gap >= -units;
 }
 
 /**
@@ -126,7 +154,7 @@ LPL_TEST(normalising_gives_a_unit_root_mean_square)
                                    lpl::math::Fixed32::one()};
     lpl::math::Fixed32 normed[4] = {};
 
-    lpl::infer::rmsNorm(lpl::infer::ConstVectorView{values, 4u}, lpl::infer::ConstVectorView{gains, 4u},
+    lpl::infer::rmsNorm(lpl::infer::ConstVectorView{values, 4u}, lpl::infer::ConstVectorView{gains, 4u}, 0u,
                         lpl::infer::VectorView{normed, 4u});
 
     const lpl::math::Fixed32 meanSquare = lpl::math::Fixed32::fromRaw(dotProduct(normed, normed, 4u).raw() / 4);
@@ -136,6 +164,77 @@ LPL_TEST(normalising_gives_a_unit_root_mean_square)
                    lpl::math::Fixed32::fromRaw(lpl::math::Fixed32::kOne / 16),
                "rmsNorm leaves a vector with unit root mean square");
     test.measureHexadecimal("root_mean_square", static_cast<lpl::core::u32>(rootMeanSquare.raw()));
+}
+
+/**
+ * @brief A vector of root mean square 0.0035 keeps the bits its mean square holds below one raw unit.
+ *
+ * @details Raw 197 and 262: the mean of their squares is 53,726 in units of 2^-32, under one raw unit of Q16.16.
+ *          Expected values are x / sqrt(mean(x^2)) in double precision, apart from the code: 55,699.6 and 74,077.6.
+ */
+LPL_TEST(normalising_a_small_vector_keeps_the_bits_its_mean_square_holds_below_one_raw_unit)
+{
+    const lpl::core::i32 raws[2] = {197, 262};
+    lpl::math::Fixed32 normed[2] = {};
+
+    normaliseRaw(raws, 2u, 0u, normed);
+    test.check(withinRawUnits(normed[0], 55700, 2) && withinRawUnits(normed[1], 74078, 2),
+               "0.003 and 0.004 normalise to 0.8499 and 1.1303");
+    test.measure("small_first_raw", static_cast<lpl::core::u32>(normed[0].raw()));
+}
+
+/**
+ * @brief A vector of root mean square 3535.5 normalises without wrapping.
+ *
+ * @details 3000 and -4000: the mean of their squares is 12,500,000, past the 32,768 a Q16.16 word holds. Expected
+ *          values, in double precision apart from the code: 55,609.1 and -74,145.5.
+ */
+LPL_TEST(normalising_a_vector_whose_rms_passes_181_does_not_wrap)
+{
+    const lpl::core::i32 raws[2] = {3000 * 65536, -4000 * 65536};
+    lpl::math::Fixed32 normed[2] = {};
+
+    normaliseRaw(raws, 2u, 0u, normed);
+    test.check(withinRawUnits(normed[0], 55609, 2) && withinRawUnits(normed[1], -74146, 2),
+               "3000 and -4000 normalise to 0.8485 and -1.1314");
+}
+
+/**
+ * @brief Sixty-four values of plus or minus 30,000 normalise to plus or minus one, though the sum of their squares
+ *        passes 2^64 in units of 2^-32.
+ */
+LPL_TEST(normalising_a_wide_vector_near_the_range_does_not_overflow_its_sum)
+{
+    lpl::core::i32 raws[kWideNormValues] = {};
+    lpl::math::Fixed32 normed[kWideNormValues] = {};
+
+    for (lpl::core::u32 index = 0u; index < kWideNormValues; ++index)
+        raws[index] = (index % 2u == 0u ? 30000 : -30000) * 65536;
+    normaliseRaw(raws, kWideNormValues, 0u, normed);
+
+    bool everyOne = true;
+    for (lpl::core::u32 index = 0u; everyOne && index < kWideNormValues; ++index)
+        everyOne = withinRawUnits(normed[index], index % 2u == 0u ? 65536 : -65536, 1);
+    test.check(everyOne, "each normalises to plus or minus one");
+}
+
+/**
+ * @brief The model's epsilon is added to the mean of the squares before its root.
+ *
+ * @details Two values of 2^-8: the mean of their squares is 65,536 in units of 2^-32, and an epsilon of 1e-5 is
+ *          42,950 of them. The root of 108,486 makes each value 0.77724, raw 50,937.0 in double precision apart from
+ *          the code; without the epsilon, each is exactly one.
+ */
+LPL_TEST(the_model_s_epsilon_is_added_to_the_mean_square_before_its_root)
+{
+    const lpl::core::i32 raws[2] = {256, 256};
+    lpl::math::Fixed32 withEpsilon[2] = {};
+    lpl::math::Fixed32 without[2] = {};
+
+    normaliseRaw(raws, 2u, kEpsilonOneInHundredThousand, withEpsilon);
+    normaliseRaw(raws, 2u, 0u, without);
+    test.check(withinRawUnits(withEpsilon[0], 50937, 2), "an epsilon of 1e-5 makes 2^-8 normalise to 0.77724");
+    test.check(without[0] == lpl::math::Fixed32::one(), "and none makes it exactly one");
 }
 
 /**

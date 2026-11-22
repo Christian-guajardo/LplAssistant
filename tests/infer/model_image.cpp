@@ -32,7 +32,7 @@ constexpr lpl::core::u32 kHeaderFlagsWord = 16u;
 constexpr lpl::core::u32 kHeaderCountWord = 20u;
 constexpr lpl::core::u32 kHeaderImageBytesWord = 24u;
 constexpr lpl::core::u32 kHeaderHeadsWord = 40u;
-constexpr lpl::core::u32 kHeaderReservedWord = 60u;
+constexpr lpl::core::u32 kNormEpsilon = 42950u; ///< 1e-5 in units of 2^-32, rounded.
 
 /**
  * @brief The parity model's shape with the canonical vocabulary's size.
@@ -367,6 +367,42 @@ LPL_TEST(a_written_image_is_accepted_and_reads_back_to_the_same_weights)
 }
 
 /**
+ * @brief An image carries its model's norm epsilon, and every reading gives it back.
+ */
+LPL_TEST(an_image_carries_its_model_s_norm_epsilon_and_reads_back_with_it)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+    lpl::infer::Model reopened;
+    lpl::infer::Model viewed;
+    lpl::core::u32 size = 0u;
+
+    test.check(lpl::infer::buildParityVocab(arena, vocab), "the canonical vocabulary builds");
+    lpl::infer::ModelConfig shape = lpl::infer::parityModelConfig();
+    shape.vocabSize = vocab.size();
+    shape.normEpsilon = kNormEpsilon;
+    test.check(model.synthesise(arena, shape, vocab, lpl::infer::parityModelSeed()) &&
+                   model.config().normEpsilon == kNormEpsilon,
+               "a model of epsilon 1e-5 builds");
+
+    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    test.check(image != nullptr, "and its image is written");
+    if (image == nullptr)
+        return;
+
+    const lpl::infer::ModelImageInspection inspection = lpl::infer::inspectModelImage(image, size, nullptr, 0u);
+    test.check(inspection.verdict == lpl::infer::ModelImageVerdict::Accepted &&
+                   inspection.header.shape.normEpsilon == kNormEpsilon,
+               "its header gives the epsilon");
+    test.check(reopened.open(arena, image, size) && reopened.config().normEpsilon == kNormEpsilon,
+               "a copy reads it back");
+    test.check(viewed.view(arena, image, size).verdict == lpl::infer::ModelReadVerdict::Read &&
+                   viewed.config().normEpsilon == kNormEpsilon,
+               "and so does a reading in place");
+}
+
+/**
  * @brief Written at an alignment of 2^16, the image keeps each expert on a 64 KiB boundary and still reads back.
  */
 LPL_TEST(an_image_written_at_64_kib_reads_back_with_its_experts_on_that_boundary)
@@ -426,9 +462,8 @@ LPL_TEST(every_corruption_of_the_header_or_the_table_is_refused_by_name)
     test.check(refusedWith(image, size, kHeaderVersionWord, 3u, lpl::infer::ModelImageVerdict::UnknownVersion, 0u),
                "a version 3");
     test.check(refusedWith(image, size, kHeaderBytesWord, 60u, lpl::infer::ModelImageVerdict::BadHeader, 0u) &&
-                   refusedWith(image, size, kHeaderFlagsWord, 1u, lpl::infer::ModelImageVerdict::BadHeader, 0u) &&
-                   refusedWith(image, size, kHeaderReservedWord, 1u, lpl::infer::ModelImageVerdict::BadHeader, 0u),
-               "header bytes of 60, a flag set, a reserved word set");
+                   refusedWith(image, size, kHeaderFlagsWord, 1u, lpl::infer::ModelImageVerdict::BadHeader, 0u),
+               "header bytes of 60, a flag set");
     test.check(refusedWith(image, size, kHeaderAlignmentWord, 11u, lpl::infer::ModelImageVerdict::BadAlignment, 0u) &&
                    refusedWith(image, size, kHeaderAlignmentWord, 23u, lpl::infer::ModelImageVerdict::BadAlignment, 0u),
                "an alignment of 2^11 or 2^23");
