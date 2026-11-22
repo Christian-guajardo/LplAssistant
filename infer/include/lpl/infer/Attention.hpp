@@ -10,11 +10,13 @@
  *   - the softmax goes through @c math::fixedExp, because libm is unavailable to
  *     anything linked into the kernel and a float exponential would put the whole
  *     distribution one rounding mode away from a different answer;
- *   - the rotary frequency ladder is base two, not base ten thousand. The usual
- *     @f$\theta_j = 10000^{-2j/d}@f$ needs a transcendental power that this module
- *     is not allowed to compute. Halving per pair gives the same thing the ladder is
- *     for — a spread of wavelengths from one position to the whole window — with an
- *     exponent the hardware expresses exactly as a shift.
+ *   - the rotary frequencies are the model's own table (@ref RotaryFrequencies),
+ *     not a ladder computed here. The usual @f$\theta_j = b^{-2j/d}@f$, whatever the
+ *     base b or the scaling a model was trained with, needs a transcendental power
+ *     that this module is not allowed to compute: whoever builds the model computes
+ *     it once. Each entry is in turns per position, Q0.32, so the angle at a position
+ *     is one 32-bit product that wraps a whole turn exactly, where an angle kept in
+ *     radians would lose digits as the position grows.
  *
  * @author MasterLaplace
  * @version 0.1.0
@@ -59,12 +61,14 @@ void rmsNorm(ConstVectorView input, ConstVectorView gain, core::u32 epsilon, Vec
  * three and a query at position seven see a separation of four wherever the window
  * has since slid to.
  *
- * @param vector   Query or key run, @c heads * headDim long.
- * @param heads    Attention heads.
- * @param headDim  Channels per head; pairs are (2i, 2i+1) within a head.
- * @param position Absolute position of the token.
+ * @param vector      Query or key run, @c heads * headDim long.
+ * @param heads       Attention heads.
+ * @param headDim     Channels per head; pairs are (2i, 2i+1) within a head.
+ * @param frequencies How far pair i turns per position; @c headDim / 2 entries.
+ * @param position    Absolute position of the token.
  */
-void applyRotaryEmbedding(VectorView vector, core::u32 heads, core::u32 headDim, core::u32 position) noexcept;
+void applyRotaryEmbedding(VectorView vector, core::u32 heads, core::u32 headDim, RotaryFrequencies frequencies,
+                          core::u32 position) noexcept;
 
 /**
  * @brief Turns scores into a distribution, in place.
@@ -83,6 +87,7 @@ void softmaxInPlace(VectorView scores) noexcept;
  *
  * @param shape    The model's extents.
  * @param weights  This block's tensors.
+ * @param rotary   How far each pair of a head turns per position, @ref Model::rotaryFrequencies.
  * @param cache    Where this position's key and value are stored, and the past read.
  * @param layer    Block index.
  * @param slot     Cache slot for this token, from @ref KvCache::reserve.
@@ -94,9 +99,9 @@ void softmaxInPlace(VectorView scores) noexcept;
  * @param blend    Scratch, @c dim long.
  * @param blocks   Scratch, @ref quantBlockCount(dim) blocks.
  */
-void attentionBlock(const ModelConfig &shape, const LayerWeights &weights, KvCache &cache, core::u32 layer,
-                    core::u32 slot, core::u32 position, VectorView residual, VectorView normed, VectorView query,
-                    VectorView scores, VectorView blend, QuantBlock *blocks) noexcept;
+void attentionBlock(const ModelConfig &shape, const LayerWeights &weights, RotaryFrequencies rotary, KvCache &cache,
+                    core::u32 layer, core::u32 slot, core::u32 position, VectorView residual, VectorView normed,
+                    VectorView query, VectorView scores, VectorView blend, QuantBlock *blocks) noexcept;
 
 } // namespace lpl::infer
 

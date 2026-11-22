@@ -4,10 +4,11 @@
  *
  * An image opens on a header of 64 bytes and the table of its segments, so that whoever maps it reads
  * where every segment lies without touching a page that is not mapped yet. The resident segments (the
- * vocabulary, the embedding, each layer's attention and the final norm) follow the table, 64-byte aligned; each
- * expert, a layer's feed-forward matrices one after the other, starts on a boundary of the image's alignment, 4 KiB
- * unless the writer asked for more, so that one page fault can bring exactly one expert in (LplKernel#198). A dense
- * model's feed-forward network of a layer is that layer's one shared expert.
+ * vocabulary, the embedding, each layer's attention, the final norm and the rotary table) follow the table, 64-byte
+ * aligned; each expert, a layer's feed-forward matrices one after the other, starts on a boundary of the image's
+ * alignment, 4 KiB unless the writer asked for more, so that one page fault can bring exactly one expert in
+ * (LplKernel#198). A dense model's feed-forward network of a layer is that layer's one shared expert. The rotary table
+ * holds a word per pair of a head, how far that pair turns per position in units of 2^-32 turn (RotaryFrequencies).
  *
  * The table is checked whole on its own, which is cheap enough for a boot; the signature of a segment is checked
  * when the segment is read, so that a pager checks only what a fault brought in. Each refusal names what it refuses.
@@ -39,6 +40,7 @@ namespace lpl::infer {
  * The version word of the one layout read and written: a header, the segment table, then the segments. LplAssistant
  * 0.4.0 and 0.5.0 wrote this layout as 2, a number left from the one it replaced. That retired layout said 1 too, and
  * fails as a bad header: its width stands where this header gives its own size, and its heads where the flags are 0.
+ * An image of LplAssistant 0.6.2 or older holds no rotary table, 2L + 3 segments, and fails as a bad segment count.
  */
 inline constexpr core::u32 kModelImageVersion = 1u;
 
@@ -70,6 +72,7 @@ enum class ModelSegmentRole : core::u32 {
     Attention = 3u,   ///< A layer's two norms, then its query, key, value and output matrices.
     FeedForward = 4u, ///< A layer's gate, up and down matrices: one expert.
     FinalNorm = 5u,   ///< The norm before the output head.
+    Rotary = 6u,      ///< How far each pair of a head turns per position: RotaryFrequencies, one word per pair.
 };
 
 /**
@@ -121,7 +124,7 @@ enum class ModelImageVerdict : core::u32 {
     BadAlignment = 5u,        ///< An alignment below 2^12 or above 2^22.
     BadShape = 6u,            ///< An extent at 0, heads that do not divide the width, or no vocabulary text.
     BadImageBytes = 7u,       ///< The bytes the header gives are not the image's.
-    BadSegmentCount = 8u,     ///< Not the 2L + 3 segments of a dense model of L layers.
+    BadSegmentCount = 8u,     ///< Not the 2L + 4 segments of a dense model of L layers.
     SegmentUnexpected = 9u,   ///< A role, residency, layer or expert out of the table's order, or a reserved word set.
     SegmentWrongLength = 10u, ///< A length the shape does not give that role.
     SegmentMisaligned = 11u,  ///< A resident off 64 bytes, or an expert off the image's alignment.
@@ -149,9 +152,9 @@ struct ModelImageInspection {
 
 /**
  * @brief The segments of a dense model's image: the vocabulary, the embedding, each layer's attention, the
- *        final norm, then each layer's expert.
+ *        final norm, the rotary table, then each layer's expert.
  * @param shape The transformer's extents.
- * @return 2L + 3; 0 for a shape whose count passes 32 bits.
+ * @return 2L + 4; 0 for a shape whose count passes 32 bits.
  */
 [[nodiscard]] core::u32 modelImageSegmentCount(const ModelConfig &shape) noexcept;
 
@@ -176,7 +179,7 @@ struct ModelImageInspection {
  * @param shape          The transformer's extents.
  * @param vocabTextBytes Bytes of the vocabulary's text.
  * @param alignmentLog2  Each expert's alignment, kModelImageLeastAlignmentLog2 to kModelImageMostAlignmentLog2.
- * @param segments       Receives 2L + 3 entries, signatures at 0; nullptr for the image's bytes alone.
+ * @param segments       Receives 2L + 4 entries, signatures at 0; nullptr for the image's bytes alone.
  * @param capacity       Room in @p segments.
  * @return The image's bytes; 0 when the shape or the alignment is refused, or the room is short.
  */

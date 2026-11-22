@@ -96,28 +96,24 @@ math::Fixed32 divideByRoot(math::Fixed32 value, ScaledRoot root) noexcept
     return math::Fixed32::fromRaw(static_cast<core::i32>(quotient));
 }
 
-/// Two pi in Q16.16, for reducing a rotary angle before it reaches the CORDIC.
-const math::Fixed32 kTwoPi = math::Fixed32::pi() * math::Fixed32::fromInt(2);
+/** Two pi in Q16.16, 411774 raw units: a whole turn of a rotary angle, the period CORDIC's own reduction uses. */
+constexpr core::u64 kTwoPiRaw = 2u * static_cast<core::u64>(math::Fixed32::pi().raw());
 
 /**
- * @brief Brings an angle into [0, 2pi).
- *
- * Done here rather than left to the CORDIC because the rotary angle grows with the
- * position and a window of a few dozen tokens already exceeds any range a rotation
- * kernel reduces for free. Subtraction rather than a division: the loop runs a few
- * dozen times at worst and every step is exact, where a division would round once
- * and make two positions that differ by a full turn disagree.
- *
- * @param angle Angle in radians.
- * @return The equivalent angle in [0, 2pi).
+ * @brief How far a pair that turns by @p turnsPerPosition per position has turned at @p position, in units of 2^-32
+ *        turn: modulo a whole turn, which unsigned 32-bit arithmetic wraps exactly, at every position.
  */
-math::Fixed32 wrapAngle(math::Fixed32 angle) noexcept
+constexpr core::u32 turnsAt(core::u32 position, core::u32 turnsPerPosition) noexcept
 {
-    while (angle >= kTwoPi)
-        angle -= kTwoPi;
-    while (angle < math::Fixed32::zero())
-        angle += kTwoPi;
-    return angle;
+    return position * turnsPerPosition;
+}
+
+/**
+ * @brief The angle of @p turns units of 2^-32 turn, in Q16.16 radians, in [0, 2 pi).
+ */
+math::Fixed32 angleOfTurns(core::u32 turns) noexcept
+{
+    return math::Fixed32::fromRaw(static_cast<core::i32>((static_cast<core::u64>(turns) * kTwoPiRaw) >> 32));
 }
 
 /**
@@ -162,20 +158,16 @@ void rmsNorm(ConstVectorView input, ConstVectorView gain, core::u32 epsilon, Vec
         out.at(i) = divideByRoot(input.at(i), root) * gain.at(i);
 }
 
-void applyRotaryEmbedding(VectorView vector, core::u32 heads, core::u32 headDim, core::u32 position) noexcept
+void applyRotaryEmbedding(VectorView vector, core::u32 heads, core::u32 headDim, RotaryFrequencies frequencies,
+                          core::u32 position) noexcept
 {
-    LPL_VERIFY(vector.count == heads * headDim);
-    const core::u32 pairs = headDim / 2u;
+    LPL_VERIFY(vector.count == heads * headDim && frequencies.pairs == headDim / 2u);
 
-    for (core::u32 pair = 0u; pair < pairs; ++pair)
+    for (core::u32 pair = 0u; pair < frequencies.pairs; ++pair)
     {
-        // theta = 2^-pair. Exact, and the reason this ladder is base two.
-        const math::Fixed32 frequency = math::Fixed32::fromRaw(math::Fixed32::kOne >> pair);
-        const math::Fixed32 angle = wrapAngle(math::Fixed32::fromInt(static_cast<core::i32>(position)) * frequency);
-
         math::Fixed32 sine{};
         math::Fixed32 cosine{};
-        math::Cordic::sincos(angle, sine, cosine);
+        math::Cordic::sincos(angleOfTurns(turnsAt(position, frequencies.turnsPerPosition[pair])), sine, cosine);
 
         for (core::u32 head = 0u; head < heads; ++head)
         {
@@ -223,9 +215,9 @@ void softmaxInPlace(VectorView scores) noexcept
             static_cast<core::i32>((static_cast<core::i64>(scores.at(i).raw()) << math::Fixed32::kFracBits) / total));
 }
 
-void attentionBlock(const ModelConfig &shape, const LayerWeights &weights, KvCache &cache, core::u32 layer,
-                    core::u32 slot, core::u32 position, VectorView residual, VectorView normed, VectorView query,
-                    VectorView scores, VectorView blend, QuantBlock *blocks) noexcept
+void attentionBlock(const ModelConfig &shape, const LayerWeights &weights, RotaryFrequencies rotary, KvCache &cache,
+                    core::u32 layer, core::u32 slot, core::u32 position, VectorView residual, VectorView normed,
+                    VectorView query, VectorView scores, VectorView blend, QuantBlock *blocks) noexcept
 {
     const core::u32 headDim = shape.headDim();
     const VectorView key = cache.key(layer, slot);
@@ -237,8 +229,8 @@ void attentionBlock(const ModelConfig &shape, const LayerWeights &weights, KvCac
     quantisedMatVecPrepared(weights.key, blocks, key);
     quantisedMatVecPrepared(weights.value, blocks, value);
 
-    applyRotaryEmbedding(query, shape.heads, headDim, position);
-    applyRotaryEmbedding(key, shape.heads, headDim, position);
+    applyRotaryEmbedding(query, shape.heads, headDim, rotary, position);
+    applyRotaryEmbedding(key, shape.heads, headDim, rotary, position);
 
     // 1 / sqrt(headDim). Computed rather than tabulated: a table would be a second
     // statement of the head width, and the two would drift the day one changed.

@@ -111,6 +111,12 @@ struct ModelConfig {
     [[nodiscard]] constexpr core::u32 headDim() const noexcept { return heads == 0u ? 0u : dim / heads; }
 
     /**
+     * @brief Channel pairs of one attention head, each turned by its own rotary frequency.
+     * @return headDim() / 2, rounded down: an odd head's last channel is not turned.
+     */
+    [[nodiscard]] constexpr core::u32 rotaryPairs() const noexcept { return headDim() / 2u; }
+
+    /**
      * @brief Is this shape self-consistent?
      * @return true when every extent is non-zero and the heads divide the width.
      */
@@ -119,6 +125,19 @@ struct ModelConfig {
         return dim != 0u && layers != 0u && heads != 0u && ffnHidden != 0u && contextLength != 0u && vocabSize != 0u &&
                (dim % heads) == 0u;
     }
+};
+
+/**
+ * @struct RotaryFrequencies
+ * @brief How far each channel pair of a head turns per position, one table shared by every layer and head.
+ *
+ * Pair i turns by turnsPerPosition[i] / 2^32 of a turn per position, an unsigned Q0.32 fraction of a turn: the angle
+ * at a position is their product modulo 2^32, which 32-bit arithmetic wraps exactly at every position. Whoever builds
+ * the model computes the table from its own base and scaling, so ring 0 computes no power.
+ */
+struct RotaryFrequencies {
+    const core::u32 *turnsPerPosition{nullptr}; ///< One entry per pair, in units of 2^-32 turn per position.
+    core::u32 pairs{0u};                        ///< Entries: a head's channels halved, rounded down.
 };
 
 /**
@@ -278,6 +297,13 @@ public:
     [[nodiscard]] ConstVectorView finalNorm() const noexcept { return _finalNorm; }
 
     /**
+     * @brief How far each pair of a head turns per position: the image's own table, or, for a model a seed derives,
+     *        2^-i radians for pair i, rounded to a unit.
+     * @return config().rotaryPairs() entries, in units of 2^-32 turn per position.
+     */
+    [[nodiscard]] RotaryFrequencies rotaryFrequencies() const noexcept { return _rotary; }
+
+    /**
      * @brief Is there a model here?
      * @return true once @ref synthesise or @ref open has succeeded.
      */
@@ -286,7 +312,8 @@ public:
     /**
      * @brief Folds every weight into a running signature.
      *
-     * Blocks are folded as scale plus lanes, in declaration order. Folding the
+     * Blocks are folded as scale plus lanes, in declaration order, then the final
+     * norm and the rotary table. Folding the
      * QUANTISED form and not the values it came from is what makes the signature
      * mean something: two targets that rounded a weight differently would agree on
      * the source values and disagree here, which is precisely the failure the gate
@@ -318,6 +345,7 @@ private:
     Vocab _vocab{};
     QuantMatrixView _embedding{};
     ConstVectorView _finalNorm{};
+    RotaryFrequencies _rotary{};
     LayerWeights *_layers{nullptr};
 };
 

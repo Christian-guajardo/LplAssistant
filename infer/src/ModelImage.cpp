@@ -15,8 +15,14 @@ constexpr core::u32 kBlockImageBytes = 4u + kQuantBlockLanes;
 /** Bytes a vocabulary entry occupies: its text's offset and length. */
 constexpr core::u32 kVocabEntryBytes = 8u;
 
-/** Segments a dense model's image holds besides two per layer: the vocabulary, the embedding, the final norm. */
-constexpr core::u32 kSegmentsBesidesLayers = 3u;
+/** Bytes a rotary table's entry occupies: one pair's turns per position. */
+constexpr core::u32 kRotaryEntryBytes = 4u;
+
+/**
+ * Segments a dense model's image holds besides two per layer: the vocabulary, the embedding, the final norm, the rotary
+ * table.
+ */
+constexpr core::u32 kSegmentsBesidesLayers = 4u;
 
 /**
  * @name Byte positions inside the header
@@ -98,7 +104,8 @@ bool alignmentAccepted(core::u32 alignmentLog2) noexcept
 
 /**
  * @brief The zero-based @p index -th entry a dense model of @p shape holds, its offset and signature at 0: the
- *        vocabulary, the embedding, each layer's attention, the final norm, then each layer's expert.
+ *        vocabulary, the embedding, each layer's attention, the final norm, the rotary table, then each layer's
+ *        expert.
  */
 ModelSegment expectedSegment(const ModelConfig &shape, core::u32 vocabTextBytes, core::u32 index) noexcept
 {
@@ -126,11 +133,16 @@ ModelSegment expectedSegment(const ModelConfig &shape, core::u32 vocabTextBytes,
         segment.role = ModelSegmentRole::FinalNorm;
         segment.length = dim * 4u;
     }
+    else if (index == shape.layers + 3u)
+    {
+        segment.role = ModelSegmentRole::Rotary;
+        segment.length = static_cast<core::u64>(shape.rotaryPairs()) * kRotaryEntryBytes;
+    }
     else
     {
         segment.role = ModelSegmentRole::FeedForward;
         segment.residency = ModelSegmentResidency::SharedExpert;
-        segment.layer = index - (shape.layers + 2u);
+        segment.layer = index - (shape.layers + 3u);
         segment.expert = 1u;
         segment.length =
             2u * modelMatrixImageBytes(shape.ffnHidden, shape.dim) + modelMatrixImageBytes(shape.dim, shape.ffnHidden);

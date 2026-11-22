@@ -62,8 +62,8 @@ bool Transformer::forward(core::u32 token, core::u32 position, KvCache &cache, V
 
     for (core::u32 l = 0u; l < shape.layers; ++l)
     {
-        attentionBlock(shape, _model->layer(l), cache, l, slot, position, _residual, _normed, _query, _scores, _blend,
-                       _blocks);
+        attentionBlock(shape, _model->layer(l), _model->rotaryFrequencies(), cache, l, slot, position, _residual,
+                       _normed, _query, _scores, _blend, _blocks);
         feedForwardBlock(shape, _model->layer(l), _residual, _normed, _gate, _up, _blocks);
     }
 
