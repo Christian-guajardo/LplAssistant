@@ -105,6 +105,7 @@ struct ModelConfig {
     core::u32 contextLength{0u}; ///< Positions the cache can hold.
     core::u32 vocabSize{0u};     ///< Tokens; must equal the bound vocabulary's size.
     core::u32 normEpsilon{0u};   ///< Added to the mean of the squares before its root, in units of 2^-32; 0 adds none.
+    core::u32 keyValueHeads{0u}; ///< Key and value heads, each read by headsPerKeyValueHead() query heads.
 
     /**
      * @brief Width of one attention head.
@@ -119,14 +120,23 @@ struct ModelConfig {
     [[nodiscard]] constexpr core::u32 rotaryPairs() const noexcept { return headDim() / 2u; }
 
     /**
-     * @brief Is this shape self-consistent?
-     * @return true when every extent is non-zero and the heads divide the width.
+     * @brief Width of one position's keys in one layer, and of its values.
+     * @return keyValueHeads * headDim().
      */
-    [[nodiscard]] constexpr bool valid() const noexcept
-    {
-        return dim != 0u && layers != 0u && heads != 0u && ffnHidden != 0u && contextLength != 0u && vocabSize != 0u &&
-               (dim % heads) == 0u;
-    }
+    [[nodiscard]] constexpr core::u32 keyValueWidth() const noexcept { return keyValueHeads * headDim(); }
+
+    /**
+     * @brief Query heads that read one key and value head: query head h reads key and value head
+     *        h / headsPerKeyValueHead(), so consecutive query heads share one, as arXiv:2305.13245 §2.2 groups them.
+     * @return heads / keyValueHeads; 0 when keyValueHeads is.
+     */
+    [[nodiscard]] constexpr core::u32 headsPerKeyValueHead() const noexcept;
+
+    /**
+     * @brief Is this shape self-consistent?
+     * @return true when every extent is non-zero, the heads divide the width and the key/value heads divide the heads.
+     */
+    [[nodiscard]] constexpr bool valid() const noexcept;
 };
 
 /**
@@ -148,8 +158,8 @@ struct RotaryFrequencies {
  */
 struct LayerWeights {
     QuantMatrixView query{};           ///< dim x dim
-    QuantMatrixView key{};             ///< dim x dim
-    QuantMatrixView value{};           ///< dim x dim
+    QuantMatrixView key{};             ///< keyValueWidth x dim
+    QuantMatrixView value{};           ///< keyValueWidth x dim
     QuantMatrixView output{};          ///< dim x dim
     QuantMatrixView gate{};            ///< ffnHidden x dim
     QuantMatrixView up{};              ///< ffnHidden x dim
@@ -381,6 +391,8 @@ private:
 };
 
 } // namespace lpl::infer
+
+#        include <lpl/infer/Model.inl>
 
 #    endif // LPL_HAS_FOUNDATION
 

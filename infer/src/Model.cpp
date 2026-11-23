@@ -473,8 +473,8 @@ ModelReadVerdict copyAttention(TensorArena &arena, const core::u8 *&cursor, cons
     const bool fit = copyVector(arena, cursor, shape.dim, out.attentionNorm) &&
                      copyVector(arena, cursor, shape.dim, out.feedForwardNorm) &&
                      copyMatrix(arena, cursor, shape.dim, shape.dim, out.query) &&
-                     copyMatrix(arena, cursor, shape.dim, shape.dim, out.key) &&
-                     copyMatrix(arena, cursor, shape.dim, shape.dim, out.value) &&
+                     copyMatrix(arena, cursor, shape.keyValueWidth(), shape.dim, out.key) &&
+                     copyMatrix(arena, cursor, shape.keyValueWidth(), shape.dim, out.value) &&
                      copyMatrix(arena, cursor, shape.dim, shape.dim, out.output);
     return fit ? ModelReadVerdict::Read : ModelReadVerdict::ArenaExhausted;
 }
@@ -487,8 +487,8 @@ void viewAttention(const core::u8 *&cursor, const ModelConfig &shape, LayerWeigh
     viewVector(cursor, shape.dim, out.attentionNorm);
     viewVector(cursor, shape.dim, out.feedForwardNorm);
     viewMatrix(cursor, shape.dim, shape.dim, out.query);
-    viewMatrix(cursor, shape.dim, shape.dim, out.key);
-    viewMatrix(cursor, shape.dim, shape.dim, out.value);
+    viewMatrix(cursor, shape.keyValueWidth(), shape.dim, out.key);
+    viewMatrix(cursor, shape.keyValueWidth(), shape.dim, out.value);
     viewMatrix(cursor, shape.dim, shape.dim, out.output);
 }
 
@@ -676,8 +676,8 @@ bool Model::synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab
         math::Random feedForwardNormStream = math::deriveStream(seed, kSaltFeedForwardNorm + tag);
 
         if (!synthesiseMatrix(arena, scratch, queryStream, shape.dim, shape.dim, layers[l].query) ||
-            !synthesiseMatrix(arena, scratch, keyStream, shape.dim, shape.dim, layers[l].key) ||
-            !synthesiseMatrix(arena, scratch, valueStream, shape.dim, shape.dim, layers[l].value) ||
+            !synthesiseMatrix(arena, scratch, keyStream, shape.keyValueWidth(), shape.dim, layers[l].key) ||
+            !synthesiseMatrix(arena, scratch, valueStream, shape.keyValueWidth(), shape.dim, layers[l].value) ||
             !synthesiseMatrix(arena, scratch, outputStream, shape.dim, shape.dim, layers[l].output) ||
             !synthesiseMatrix(arena, scratch, gateStream, shape.ffnHidden, shape.dim, layers[l].gate) ||
             !synthesiseMatrix(arena, scratch, upStream, shape.ffnHidden, shape.dim, layers[l].up) ||

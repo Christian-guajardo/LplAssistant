@@ -44,13 +44,13 @@ namespace lpl::infer {
  * The version word of the one layout read and written: a header, the segment table, then the segments. LplAssistant
  * 0.4.0 and 0.5.0 wrote this layout as 2, a number left from the one it replaced. That retired layout said 1 too, and
  * fails as a bad header: its width stands where this header gives its own size, and its heads where the flags are 0.
- * An image of LplAssistant 0.6.2 or before has a header of 64 bytes, without the merge count and the pre-tokenizer,
- * and fails as a bad header too.
+ * An image of LplAssistant 0.6.2 or before has a header of 64 bytes, without the merge count, the pre-tokenizer and the
+ * key/value heads, and fails as a bad header too.
  */
 inline constexpr core::u32 kModelImageVersion = 1u;
 
 /** Bytes of a header. */
-inline constexpr core::u32 kModelImageHeaderBytes = 72u;
+inline constexpr core::u32 kModelImageHeaderBytes = 76u;
 
 /** Bytes of one entry of the segment table. */
 inline constexpr core::u32 kModelSegmentEntryBytes = 40u;
@@ -74,7 +74,7 @@ inline constexpr core::u32 kModelImageResidentAlignment = 64u;
 enum class ModelSegmentRole : core::u32 {
     Vocabulary = 1u,  ///< The token table: each token's offset and length, then the text.
     Embedding = 2u,   ///< The tied embedding and output matrix.
-    Attention = 3u,   ///< A layer's two norms, then its query, key, value and output matrices.
+    Attention = 3u,   ///< Two norms, then the query, key, value and output matrices, key and value keyValueWidth rows.
     FeedForward = 4u, ///< A layer's gate, up and down matrices: one expert.
     FinalNorm = 5u,   ///< The norm before the output head.
     Rotary = 6u,      ///< How far each pair of a head turns per position: RotaryFrequencies, one word per pair.
@@ -139,7 +139,7 @@ enum class ModelImageVerdict : core::u32 {
     UnknownVersion = 3u,       ///< A version word other than @ref kModelImageVersion.
     BadHeader = 4u,            ///< The header's bytes or flags are not those written.
     BadAlignment = 5u,         ///< An alignment below 2^12 or above 2^22.
-    BadShape = 6u,             ///< An extent at 0, heads that do not divide the width, or no vocabulary text.
+    BadShape = 6u,             ///< An extent at 0, width % heads or heads % keyValueHeads not 0, or no vocabulary text.
     BadImageBytes = 7u,        ///< The bytes the header gives are not the image's.
     BadSegmentCount = 8u,      ///< Not the 2L + 5 segments of a dense model of L layers.
     SegmentUnexpected = 9u,    ///< A role, residency, layer or expert out of the table's order, or a reserved word set.

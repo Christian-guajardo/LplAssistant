@@ -42,8 +42,12 @@ constexpr lpl::core::u32 kHeaderImageBytesWord = 24u;
 constexpr lpl::core::u32 kHeaderHeadsWord = 40u;
 constexpr lpl::core::u32 kHeaderMergeCountWord = 64u;
 constexpr lpl::core::u32 kHeaderPreTokenizerWord = 68u;
+constexpr lpl::core::u32 kHeaderKeyValueHeadsWord = 72u;
 constexpr lpl::core::u32 kMergeBytes = 12u;
-constexpr lpl::core::u32 kNormEpsilon = 42950u; ///< 1e-5 in units of 2^-32, rounded.
+constexpr lpl::core::u32 kNormEpsilon = 42950u;       ///< 1e-5 in units of 2^-32, rounded.
+constexpr lpl::core::u32 kGroupedHeads = 6u;          ///< Query heads of the grouped model: three per key/value head.
+constexpr lpl::core::u32 kGroupedKeyValueHeads = 2u;  ///< Its key and value heads.
+constexpr lpl::core::u32 kGroupedAttentionEntry = 3u; ///< One-based entry of the grouped image's first attention.
 
 /**
  * @brief The parity model's shape with the canonical vocabulary's size.
@@ -57,6 +61,18 @@ constexpr lpl::core::u32 kNormEpsilon = 42950u; ///< 1e-5 in units of 2^-32, rou
 }
 
 /**
+ * @brief The parity model's shape with 6 heads of 8 channels reading 2 key/value heads.
+ */
+[[nodiscard]] lpl::infer::ModelConfig groupedShape()
+{
+    lpl::infer::ModelConfig shape = parityShape();
+
+    shape.heads = kGroupedHeads;
+    shape.keyValueHeads = kGroupedKeyValueHeads;
+    return shape;
+}
+
+/**
  * @brief Builds the canonical vocabulary and the parity model in @p arena.
  */
 [[nodiscard]] bool synthesiseParityModel(lpl::infer::TensorArena &arena, lpl::infer::Vocab &vocab,
@@ -66,6 +82,21 @@ constexpr lpl::core::u32 kNormEpsilon = 42950u; ///< 1e-5 in units of 2^-32, rou
         return false;
 
     lpl::infer::ModelConfig shape = lpl::infer::parityModelConfig();
+
+    shape.vocabSize = vocab.size();
+    return model.synthesise(arena, shape, vocab, lpl::infer::parityModelSeed());
+}
+
+/**
+ * @brief Builds the canonical vocabulary and the model of groupedShape() in @p arena.
+ */
+[[nodiscard]] bool synthesiseGroupedModel(lpl::infer::TensorArena &arena, lpl::infer::Vocab &vocab,
+                                          lpl::infer::Model &model)
+{
+    if (!lpl::infer::buildParityVocab(arena, vocab))
+        return false;
+
+    lpl::infer::ModelConfig shape = groupedShape();
 
     shape.vocabSize = vocab.size();
     return model.synthesise(arena, shape, vocab, lpl::infer::parityModelSeed());
@@ -275,7 +306,7 @@ void putWordAt(lpl::core::u8 *bytes, lpl::core::u32 offset, lpl::core::u32 value
  *        then one expert per layer on a 4 KiB boundary, then the merges, 64-byte aligned.
  *
  * @details Worked by hand for the parity shape (dim 48, 2 layers, 4 heads, feed-forward 96) with 121 tokens, 300
- *          bytes of text and 5 merges, a quantised block 36 bytes: the table ends at 72 + 9 * 40 = 432; the vocabulary
+ *          bytes of text and 5 merges, a quantised block 36 bytes: the table ends at 76 + 9 * 40 = 436; the vocabulary
  *          (8 * 121 + 300 = 1268) at 448; the embedding (121 rows of 2 blocks, 8712) at 1728; each attention (2 norms
  *          of 48 words and 4 matrices of 48 rows of 2 blocks, 14208) at 10496 and 24704; the final norm (192) at 38912,
  *          ending at 39104; the rotary table (6 pairs of a head of 12 channels, a word each, 24) at 39104, ending at
@@ -318,6 +349,37 @@ LPL_TEST(a_dense_model_lays_out_its_residents_then_one_expert_per_layer)
 }
 
 /**
+ * @brief A model of 6 heads reading 2 key/value heads lays out each attention with key and value matrices 16 rows
+ *        high, one row per channel of a key/value head: 9600 bytes where the parity model's 4 heads of their own take
+ *        14208.
+ *
+ * @details Worked by hand for the parity shape with 6 heads of 8 channels and 2 key/value heads, 121 tokens, 300 bytes
+ *          of text and 5 merges: the table ends at 76 + 9 * 40 = 436; the vocabulary (1268) at 448; the embedding
+ *          (8712) at 1728; each attention (2 norms of 48 words, 384; query and output of 48 rows of 2 blocks, 3456
+ *          each; key and value of 16 rows of 2 blocks, 1152 each: 9600) at 10496 and 20096; the final norm (192) at
+ *          29696; the rotary table (4 pairs of a head of 8 channels, 16) at 29888, ending at 29904; each expert (19008)
+ *          at 32768 and 53248, ending at 72256; the merges (60) at 72256, the image ending at 72316.
+ */
+LPL_TEST(a_grouped_model_lays_out_its_key_and_value_matrices_one_key_value_head_wide)
+{
+    lpl::infer::ModelSegment segments[kTableRoom];
+    const lpl::core::u64 bytes = lpl::infer::layOutModelImage(
+        groupedShape(), lpl::infer::ModelTokenizerExtents{kMadeUpVocabularyText, kMadeUpMerges},
+        lpl::infer::kModelImageDefaultAlignmentLog2, segments, kTableRoom);
+
+    test.check(bytes == 72316u, "the image is 72316 bytes");
+    test.check(segments[2].length == 9600u && segments[3].length == 9600u,
+               "each attention is 9600 bytes, its key and value matrices 16 rows high");
+    test.check(segments[5].length == 16u, "the rotary table holds a word for each of a head's 4 pairs");
+    test.check(segments[0].offset == 448u && segments[1].offset == 1728u && segments[2].offset == 10496u &&
+                   segments[3].offset == 20096u && segments[4].offset == 29696u && segments[5].offset == 29888u,
+               "each resident on the next 64 bytes after the one before");
+    test.check(segments[6].offset == 32768u && segments[7].offset == 53248u && segments[8].offset == 72256u,
+               "each expert on the next 4 KiB boundary, then the merges");
+    test.measure("grouped_image_bytes", static_cast<lpl::core::u32>(bytes));
+}
+
+/**
  * @brief An alignment of 2^21 puts each expert on a 2 MiB boundary; an alignment below 2^12 or above 2^22, a shape
  *        refused, no vocabulary text or too little room for the table lays nothing out.
  */
@@ -327,6 +389,7 @@ LPL_TEST(an_alignment_is_kept_from_4_kib_to_4_mib_and_refused_past_them)
     lpl::infer::ModelConfig badHeads = parityShape();
 
     badHeads.heads = 5u;
+    badHeads.keyValueHeads = 5u;
     const lpl::infer::ModelTokenizerExtents text{kMadeUpVocabularyText, 0u};
     const lpl::core::u64 at2Mib = lpl::infer::layOutModelImage(parityShape(), text, 21u, segments, kTableRoom);
 
@@ -425,6 +488,72 @@ LPL_TEST(an_image_carries_its_model_s_norm_epsilon_and_reads_back_with_it)
 }
 
 /**
+ * @brief An image of a model of 6 heads for 2 key/value heads gives them in its header, and reads back to the same
+ *        weights, copied and in place, still grouped.
+ */
+LPL_TEST(an_image_carries_its_key_value_heads_and_reads_back_grouped)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+    lpl::infer::Model reopened;
+    lpl::infer::Model viewed;
+    lpl::core::u32 size = 0u;
+
+    test.check(synthesiseGroupedModel(arena, vocab, model) && model.config().keyValueHeads == kGroupedKeyValueHeads,
+               "a model of 6 heads for 2 key/value heads builds");
+    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    test.check(image != nullptr, "and its image is written");
+    if (image == nullptr)
+        return;
+
+    const lpl::infer::ModelImageInspection inspection = lpl::infer::inspectModelImage(image, size, nullptr, 0u);
+    test.check(inspection.verdict == lpl::infer::ModelImageVerdict::Accepted &&
+                   inspection.header.shape.keyValueHeads == kGroupedKeyValueHeads &&
+                   wordAt(image, kHeaderKeyValueHeadsWord) == kGroupedKeyValueHeads,
+               "its header gives 2 key/value heads, in the word at byte 72");
+    test.check(reopened.open(arena, image, size) && reopened.config().keyValueHeads == kGroupedKeyValueHeads &&
+                   reopened.fold(kFnv1aOffsetBasis) == model.fold(kFnv1aOffsetBasis),
+               "a copy reads back the same weights, grouped");
+    test.check(viewed.view(arena, image, size).verdict == lpl::infer::ModelReadVerdict::Read &&
+                   viewed.config().keyValueHeads == kGroupedKeyValueHeads &&
+                   viewed.fold(kFnv1aOffsetBasis) == model.fold(kFnv1aOffsetBasis),
+               "and so does a reading in place");
+}
+
+/**
+ * @brief A header giving no key/value heads, or 4 for 6 heads, is refused as a bad shape. Giving 6 for 6 makes a shape
+ *        that holds, so the grouped image's first attention is then refused for its length.
+ */
+LPL_TEST(key_value_heads_that_do_not_divide_the_heads_are_refused_as_a_bad_shape)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+    lpl::infer::ModelSegment segments[kTableRoom];
+    lpl::infer::ModelConfig fourForSix = groupedShape();
+    lpl::core::u32 size = 0u;
+
+    fourForSix.keyValueHeads = 4u;
+    test.check(synthesiseGroupedModel(arena, vocab, model), "a model of 6 heads for 2 key/value heads builds");
+    lpl::core::u8 *const image = writeImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, size);
+    test.check(image != nullptr, "and is written");
+    if (image == nullptr)
+        return;
+
+    test.check(refusedWith(image, size, kHeaderKeyValueHeadsWord, 0u, lpl::infer::ModelImageVerdict::BadShape, 0u) &&
+                   refusedWith(image, size, kHeaderKeyValueHeadsWord, 4u, lpl::infer::ModelImageVerdict::BadShape, 0u),
+               "no key/value heads, or 4 for 6 heads, is a bad shape");
+    test.check(refusedWith(image, size, kHeaderKeyValueHeadsWord, kGroupedHeads,
+                           lpl::infer::ModelImageVerdict::SegmentWrongLength, kGroupedAttentionEntry),
+               "6 for 6 is a shape, whose attention of 14208 bytes is not the 9600 written");
+    test.check(lpl::infer::layOutModelImage(fourForSix,
+                                            lpl::infer::ModelTokenizerExtents{kMadeUpVocabularyText, kMadeUpMerges},
+                                            lpl::infer::kModelImageDefaultAlignmentLog2, segments, kTableRoom) == 0u,
+               "and nothing is laid out for 4 key/value heads over 6 heads");
+}
+
+/**
  * @brief Written at an alignment of 2^16, the image keeps each expert on a 64 KiB boundary and still reads back.
  */
 LPL_TEST(an_image_written_at_64_kib_reads_back_with_its_experts_on_that_boundary)
@@ -490,6 +619,8 @@ LPL_TEST(every_corruption_of_the_header_or_the_table_is_refused_by_name)
                "header bytes of 60, a flag set");
     test.check(refusedWith(image, size, kHeaderBytesWord, 64u, lpl::infer::ModelImageVerdict::BadHeader, 0u),
                "header bytes of 64, as LplAssistant 0.6.2 wrote, without a merge count or a pre-tokenizer");
+    test.check(refusedWith(image, size, kHeaderBytesWord, 72u, lpl::infer::ModelImageVerdict::BadHeader, 0u),
+               "header bytes of 72, without a count of key/value heads");
     test.check(refusedWith(image, size, kHeaderAlignmentWord, 11u, lpl::infer::ModelImageVerdict::BadAlignment, 0u) &&
                    refusedWith(image, size, kHeaderAlignmentWord, 23u, lpl::infer::ModelImageVerdict::BadAlignment, 0u),
                "an alignment of 2^11 or 2^23");
@@ -710,6 +841,7 @@ LPL_TEST(a_model_of_one_channel_per_head_has_an_empty_rotary_table_and_still_rea
     lpl::infer::ModelConfig shape = lpl::infer::parityModelConfig();
     shape.vocabSize = vocab.size();
     shape.heads = shape.dim;
+    shape.keyValueHeads = shape.dim;
     test.check(model.synthesise(arena, shape, vocab, lpl::infer::parityModelSeed()) &&
                    model.rotaryFrequencies().pairs == 0u,
                "a model of 48 heads of one channel builds, its table empty");

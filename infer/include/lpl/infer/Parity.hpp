@@ -46,6 +46,7 @@ namespace lpl::infer {
     shape.dim = 48u;
     shape.layers = 2u;
     shape.heads = 4u;
+    shape.keyValueHeads = 4u;
     shape.ffnHidden = 96u;
     shape.contextLength = 32u;
     shape.vocabSize = 0u;

@@ -221,6 +221,7 @@ void attentionBlock(const ModelConfig &shape, const LayerWeights &weights, Rotar
                     VectorView query, VectorView scores, VectorView blend, QuantBlock *blocks) noexcept
 {
     const core::u32 headDim = shape.headDim();
+    const core::u32 headsPerKeyValueHead = shape.headsPerKeyValueHead();
     const VectorView key = cache.key(layer, slot);
     const VectorView value = cache.value(layer, slot);
 
@@ -231,7 +232,7 @@ void attentionBlock(const ModelConfig &shape, const LayerWeights &weights, Rotar
     quantisedMatVecPrepared(weights.value, blocks, value);
 
     applyRotaryEmbedding(query, shape.heads, headDim, rotary, position);
-    applyRotaryEmbedding(key, shape.heads, headDim, rotary, position);
+    applyRotaryEmbedding(key, shape.keyValueHeads, headDim, rotary, position);
 
     // 1 / sqrt(headDim). Computed rather than tabulated: a table would be a second
     // statement of the head width, and the two would drift the day one changed.
@@ -242,12 +243,13 @@ void attentionBlock(const ModelConfig &shape, const LayerWeights &weights, Rotar
     for (core::u32 head = 0u; head < shape.heads; ++head)
     {
         const core::u32 base = head * headDim;
+        const core::u32 keyValueBase = (head / headsPerKeyValueHead) * headDim;
         const VectorView window = scores.slice(0u, attended);
 
         for (core::u32 t = 0u; t < attended; ++t)
         {
             const VectorView past = cache.key(layer, t);
-            window.at(t) = dotFixed(query.values + base, past.values + base, headDim) * scale;
+            window.at(t) = dotFixed(query.values + base, past.values + keyValueBase, headDim) * scale;
         }
         softmaxInPlace(window);
 
@@ -258,7 +260,7 @@ void attentionBlock(const ModelConfig &shape, const LayerWeights &weights, Rotar
             const VectorView past = cache.value(layer, t);
             const math::Fixed32 weight = window.at(t);
             for (core::u32 i = 0u; i < headDim; ++i)
-                blend.at(base + i) += weight * past.at(base + i);
+                blend.at(base + i) += weight * past.at(keyValueBase + i);
         }
     }
 

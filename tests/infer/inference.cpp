@@ -116,6 +116,7 @@ void normaliseRaw(const lpl::core::i32 *raws, lpl::core::u32 count, lpl::core::u
     shape.vocabSize = vocab.size();
     shape.dim = kWideHeadChannels;
     shape.heads = 1u;
+    shape.keyValueHeads = 1u;
     shape.layers = 1u;
     return model.synthesise(arena, shape, vocab, lpl::infer::parityModelSeed());
 }
