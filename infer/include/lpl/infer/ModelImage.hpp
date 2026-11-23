@@ -143,7 +143,7 @@ enum class ModelImageVerdict : core::u32 {
     BadImageBytes = 7u,        ///< The bytes the header gives are not the image's.
     BadSegmentCount = 8u,      ///< Not the 2L + 5 segments of a dense model of L layers.
     SegmentUnexpected = 9u,    ///< A role, residency, layer or expert out of the table's order, or a reserved word set.
-    SegmentWrongLength = 10u,  ///< A length the shape does not give that role.
+    SegmentWrongLength = 10u,  ///< A length the shape, or the header's merge count, does not give that role.
     SegmentMisaligned = 11u,   ///< A resident off 64 bytes, or an expert off the image's alignment.
     SegmentOverlaps = 12u,     ///< Starts before the table or the segment before it ends.
     SegmentOutside = 13u,      ///< Ends past the image.

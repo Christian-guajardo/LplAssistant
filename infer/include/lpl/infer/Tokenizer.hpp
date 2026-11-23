@@ -116,7 +116,7 @@ private:
  */
 enum class PreTokenizer : core::u32 {
     WholeText = 0u,                     ///< The text is one piece.
-    IndividualDigitsThenByteLevel = 1u, ///< Each number apart, then GPT-2's pattern: SmolLM2's; see below.
+    IndividualDigitsThenByteLevel = 1u, ///< Each number, then GPT-2's pattern (preTokenizedPieceBytes): SmolLM2's.
 };
 
 /**
