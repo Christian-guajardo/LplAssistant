@@ -13,11 +13,13 @@ constexpr lpl::core::u32 kImageVersion = 1u;
 constexpr lpl::core::u32 kRetiredImageBytes = 256u;
 constexpr lpl::core::u32 kParityVocabulary = 121u;
 constexpr lpl::core::u32 kMadeUpVocabularyText = 300u;
-constexpr lpl::core::u32 kParitySegments = 8u;
+constexpr lpl::core::u32 kMadeUpMerges = 5u;
+constexpr lpl::core::u32 kParitySegments = 9u;
 constexpr lpl::core::u32 kFinalNormEntry = 5u;          ///< One-based entry of the parity image's final norm.
 constexpr lpl::core::u32 kRotaryEntry = 6u;             ///< One-based entry of its rotary table.
 constexpr lpl::core::u32 kFirstExpertEntry = 7u;        ///< One-based entry of its first expert.
 constexpr lpl::core::u32 kSecondExpertEntry = 8u;       ///< One-based entry of its second expert.
+constexpr lpl::core::u32 kMergesEntry = 9u;             ///< One-based entry of its merges, empty.
 constexpr lpl::core::u32 kParityPairs = 6u;             ///< Pairs of the parity model's heads of 12 channels.
 constexpr lpl::core::u32 kMadeUpTurnStep = 0x9E3779B9u; ///< Pair i of a made-up table turns by i + 1 times this.
 constexpr lpl::core::u32 kTableRoom = 16u;
@@ -38,6 +40,9 @@ constexpr lpl::core::u32 kHeaderFlagsWord = 16u;
 constexpr lpl::core::u32 kHeaderCountWord = 20u;
 constexpr lpl::core::u32 kHeaderImageBytesWord = 24u;
 constexpr lpl::core::u32 kHeaderHeadsWord = 40u;
+constexpr lpl::core::u32 kHeaderMergeCountWord = 64u;
+constexpr lpl::core::u32 kHeaderPreTokenizerWord = 68u;
+constexpr lpl::core::u32 kMergeBytes = 12u;
 constexpr lpl::core::u32 kNormEpsilon = 42950u; ///< 1e-5 in units of 2^-32, rounded.
 
 /**
@@ -267,37 +272,43 @@ void putWordAt(lpl::core::u8 *bytes, lpl::core::u32 offset, lpl::core::u32 value
 
 /**
  * @brief A dense model's image holds its residents after the table, 64-byte aligned, the rotary table last among them,
- *        then one expert per layer on a 4 KiB boundary.
+ *        then one expert per layer on a 4 KiB boundary, then the merges, 64-byte aligned.
  *
- * @details Worked by hand for the parity shape (dim 48, 2 layers, 4 heads, feed-forward 96) with 121 tokens and 300
- *          bytes of text, a quantised block 36 bytes: the table ends at 64 + 8 * 40 = 384; the vocabulary (8 * 121 +
- *          300 = 1268) at 384; the embedding (121 rows of 2 blocks, 8712) at 1664; each attention (2 norms of 48 words
- *          and 4 matrices of 48 rows of 2 blocks, 14208) at 10432 and 24640; the final norm (192) at 38848, ending at
- *          39040; the rotary table (6 pairs of a head of 12 channels, a word each, 24) at 39040, ending at 39064; each
- *          expert (gate and up of 96 rows of 2 blocks, down of 48 rows of 3, 19008) at 40960 and 61440, the image
- *          ending at 80448.
+ * @details Worked by hand for the parity shape (dim 48, 2 layers, 4 heads, feed-forward 96) with 121 tokens, 300
+ *          bytes of text and 5 merges, a quantised block 36 bytes: the table ends at 72 + 9 * 40 = 432; the vocabulary
+ *          (8 * 121 + 300 = 1268) at 448; the embedding (121 rows of 2 blocks, 8712) at 1728; each attention (2 norms
+ *          of 48 words and 4 matrices of 48 rows of 2 blocks, 14208) at 10496 and 24704; the final norm (192) at 38912,
+ *          ending at 39104; the rotary table (6 pairs of a head of 12 channels, a word each, 24) at 39104, ending at
+ *          39128; each expert (gate and up of 96 rows of 2 blocks, down of 48 rows of 3, 19008) at 40960 and 61440,
+ *          ending at 80448; the merges (5 of 12 bytes, 60) at 80448, the image ending at 80508.
  */
 LPL_TEST(a_dense_model_lays_out_its_residents_then_one_expert_per_layer)
 {
     lpl::infer::ModelSegment segments[kTableRoom];
     const lpl::core::u64 bytes = lpl::infer::layOutModelImage(
-        parityShape(), kMadeUpVocabularyText, lpl::infer::kModelImageDefaultAlignmentLog2, segments, kTableRoom);
+        parityShape(), lpl::infer::ModelTokenizerExtents{kMadeUpVocabularyText, kMadeUpMerges},
+        lpl::infer::kModelImageDefaultAlignmentLog2, segments, kTableRoom);
     const lpl::infer::ModelSegmentResidency resident = lpl::infer::ModelSegmentResidency::Resident;
     const lpl::infer::ModelSegmentResidency shared = lpl::infer::ModelSegmentResidency::SharedExpert;
 
-    test.check(bytes == 80448u, "the image is 80448 bytes");
-    test.check(isSegment(segments[0], lpl::infer::ModelSegmentRole::Vocabulary, resident, 0u, 0u) &&
-                   isSegment(segments[1], lpl::infer::ModelSegmentRole::Embedding, resident, 0u, 0u) &&
-                   isSegment(segments[2], lpl::infer::ModelSegmentRole::Attention, resident, 1u, 0u) &&
-                   isSegment(segments[3], lpl::infer::ModelSegmentRole::Attention, resident, 2u, 0u) &&
-                   isSegment(segments[4], lpl::infer::ModelSegmentRole::FinalNorm, resident, 0u, 0u) &&
-                   isSegment(segments[5], lpl::infer::ModelSegmentRole::Rotary, resident, 0u, 0u) &&
-                   isSegment(segments[6], lpl::infer::ModelSegmentRole::FeedForward, shared, 1u, 1u) &&
-                   isSegment(segments[7], lpl::infer::ModelSegmentRole::FeedForward, shared, 2u, 1u),
-               "the residents in order, the rotary table after the final norm, then each layer's one shared expert");
-    test.check(segments[0].offset == 384u && segments[1].offset == 1664u && segments[2].offset == 10432u &&
-                   segments[3].offset == 24640u && segments[4].offset == 38848u && segments[5].offset == 39040u,
+    test.check(bytes == 80508u, "the image is 80508 bytes");
+    test.check(
+        isSegment(segments[0], lpl::infer::ModelSegmentRole::Vocabulary, resident, 0u, 0u) &&
+            isSegment(segments[1], lpl::infer::ModelSegmentRole::Embedding, resident, 0u, 0u) &&
+            isSegment(segments[2], lpl::infer::ModelSegmentRole::Attention, resident, 1u, 0u) &&
+            isSegment(segments[3], lpl::infer::ModelSegmentRole::Attention, resident, 2u, 0u) &&
+            isSegment(segments[4], lpl::infer::ModelSegmentRole::FinalNorm, resident, 0u, 0u) &&
+            isSegment(segments[5], lpl::infer::ModelSegmentRole::Rotary, resident, 0u, 0u) &&
+            isSegment(segments[6], lpl::infer::ModelSegmentRole::FeedForward, shared, 1u, 1u) &&
+            isSegment(segments[7], lpl::infer::ModelSegmentRole::FeedForward, shared, 2u, 1u) &&
+            isSegment(segments[8], lpl::infer::ModelSegmentRole::Merges, resident, 0u, 0u),
+        "the residents in order, the rotary table after the final norm, each layer's one shared expert, then the "
+        "merges");
+    test.check(segments[0].offset == 448u && segments[1].offset == 1728u && segments[2].offset == 10496u &&
+                   segments[3].offset == 24704u && segments[4].offset == 38912u && segments[5].offset == 39104u,
                "each resident on the next 64 bytes after the one before, the first after the table");
+    test.check(segments[8].offset == 80448u && segments[8].length == kMadeUpMerges * kMergeBytes,
+               "the merges right after the last expert, 12 bytes each");
     test.check(segments[0].length == 1268u && segments[1].length == 8712u && segments[2].length == 14208u &&
                    segments[3].length == 14208u && segments[4].length == 192u && segments[5].length == 24u &&
                    segments[6].length == 19008u && segments[7].length == 19008u,
@@ -316,19 +327,20 @@ LPL_TEST(an_alignment_is_kept_from_4_kib_to_4_mib_and_refused_past_them)
     lpl::infer::ModelConfig badHeads = parityShape();
 
     badHeads.heads = 5u;
-    const lpl::core::u64 at2Mib =
-        lpl::infer::layOutModelImage(parityShape(), kMadeUpVocabularyText, 21u, segments, kTableRoom);
+    const lpl::infer::ModelTokenizerExtents text{kMadeUpVocabularyText, 0u};
+    const lpl::core::u64 at2Mib = lpl::infer::layOutModelImage(parityShape(), text, 21u, segments, kTableRoom);
 
     test.check(at2Mib == 4194304u + 19008u && segments[6].offset == 2097152u && segments[7].offset == 4194304u,
                "at 2^21, the experts at 2 MiB and 4 MiB");
-    test.check(lpl::infer::layOutModelImage(parityShape(), kMadeUpVocabularyText, 11u, segments, kTableRoom) == 0u &&
-                   lpl::infer::layOutModelImage(parityShape(), kMadeUpVocabularyText, 23u, segments, kTableRoom) == 0u,
+    test.check(lpl::infer::layOutModelImage(parityShape(), text, 11u, segments, kTableRoom) == 0u &&
+                   lpl::infer::layOutModelImage(parityShape(), text, 23u, segments, kTableRoom) == 0u,
                "2^11 and 2^23 are refused");
-    test.check(lpl::infer::layOutModelImage(badHeads, kMadeUpVocabularyText, 12u, segments, kTableRoom) == 0u &&
-                   lpl::infer::layOutModelImage(parityShape(), 0u, 12u, segments, kTableRoom) == 0u,
+    test.check(lpl::infer::layOutModelImage(badHeads, text, 12u, segments, kTableRoom) == 0u &&
+                   lpl::infer::layOutModelImage(parityShape(), lpl::infer::ModelTokenizerExtents{0u, 0u}, 12u, segments,
+                                                kTableRoom) == 0u,
                "so are 5 heads over a width of 48, and no vocabulary text");
-    test.check(lpl::infer::layOutModelImage(parityShape(), kMadeUpVocabularyText, 12u, segments, 7u) == 0u,
-               "and a table of 8 entries into room for 7");
+    test.check(lpl::infer::layOutModelImage(parityShape(), text, 12u, segments, kParitySegments - 1u) == 0u,
+               "and a table of 9 entries into room for 8");
 }
 
 /**
@@ -465,9 +477,10 @@ LPL_TEST(every_corruption_of_the_header_or_the_table_is_refused_by_name)
     const lpl::core::u32 lastExpertLength = wordAt(image, entryAt(kSecondExpertEntry) + kEntryLength);
     const lpl::core::u32 rotaryLength = wordAt(image, entryAt(kRotaryEntry) + kEntryLength);
 
-    test.check(lpl::infer::inspectModelImage(image, 63u, segments, kTableRoom).verdict ==
-                   lpl::infer::ModelImageVerdict::TooShort,
-               "an image shorter than its header");
+    test.check(
+        lpl::infer::inspectModelImage(image, lpl::infer::kModelImageHeaderBytes - 1u, segments, kTableRoom).verdict ==
+            lpl::infer::ModelImageVerdict::TooShort,
+        "an image one byte shorter than its header");
     test.check(refusedWith(image, size, 0u, 0x4D4C504Du, lpl::infer::ModelImageVerdict::BadMagic, 0u),
                "a magic not LPLM");
     test.check(refusedWith(image, size, kHeaderVersionWord, 3u, lpl::infer::ModelImageVerdict::UnknownVersion, 0u),
@@ -475,6 +488,8 @@ LPL_TEST(every_corruption_of_the_header_or_the_table_is_refused_by_name)
     test.check(refusedWith(image, size, kHeaderBytesWord, 60u, lpl::infer::ModelImageVerdict::BadHeader, 0u) &&
                    refusedWith(image, size, kHeaderFlagsWord, 1u, lpl::infer::ModelImageVerdict::BadHeader, 0u),
                "header bytes of 60, a flag set");
+    test.check(refusedWith(image, size, kHeaderBytesWord, 64u, lpl::infer::ModelImageVerdict::BadHeader, 0u),
+               "header bytes of 64, as LplAssistant 0.6.2 wrote, without a merge count or a pre-tokenizer");
     test.check(refusedWith(image, size, kHeaderAlignmentWord, 11u, lpl::infer::ModelImageVerdict::BadAlignment, 0u) &&
                    refusedWith(image, size, kHeaderAlignmentWord, 23u, lpl::infer::ModelImageVerdict::BadAlignment, 0u),
                "an alignment of 2^11 or 2^23");
@@ -516,7 +531,19 @@ LPL_TEST(every_corruption_of_the_header_or_the_table_is_refused_by_name)
                "the last expert starting past the image's end");
     test.check(lpl::infer::inspectModelImage(image, size, segments, kParitySegments - 1u).verdict ==
                    lpl::infer::ModelImageVerdict::BadSegmentCount,
-               "a table of 8 entries into room for 7");
+               "a table of 9 entries into room for 8");
+    test.check(
+        refusedWith(image, size, kHeaderPreTokenizerWord, 2u, lpl::infer::ModelImageVerdict::UnknownPreTokenizer, 0u),
+        "a pre-tokenizer this reader does not know");
+    test.check(refusedWith(image, size, entryAt(kMergesEntry) + kEntryLength, kMergeBytes,
+                           lpl::infer::ModelImageVerdict::SegmentWrongLength, kMergesEntry) &&
+                   refusedWith(image, size, kHeaderMergeCountWord, 1u,
+                               lpl::infer::ModelImageVerdict::SegmentWrongLength, kMergesEntry),
+               "a merge where the header counts none, or one counted where the table holds none");
+    test.check(refusedWith(image, size, entryAt(kMergesEntry) + kEntryRole,
+                           static_cast<lpl::core::u32>(lpl::infer::ModelSegmentRole::Rotary),
+                           lpl::infer::ModelImageVerdict::SegmentUnexpected, kMergesEntry),
+               "a second rotary table where the merges go");
     test.check(refusedWith(image, 100u, kHeaderImageBytesWord, 100u, lpl::infer::ModelImageVerdict::TooShort, 0u),
                "100 bytes that say 100 but cannot hold the table");
     test.check(lpl::infer::inspectModelImage(image, size, segments, kTableRoom).verdict ==

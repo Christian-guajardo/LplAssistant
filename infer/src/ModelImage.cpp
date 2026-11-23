@@ -18,11 +18,14 @@ constexpr core::u32 kVocabEntryBytes = 8u;
 /** Bytes a rotary table's entry occupies: one pair's turns per position. */
 constexpr core::u32 kRotaryEntryBytes = 4u;
 
+/** Bytes a merge occupies: its left token, its right token and the token they become. */
+constexpr core::u32 kMergeEntryBytes = 12u;
+
 /**
  * Segments a dense model's image holds besides two per layer: the vocabulary, the embedding, the final norm, the rotary
- * table.
+ * table, the merges.
  */
-constexpr core::u32 kSegmentsBesidesLayers = 4u;
+constexpr core::u32 kSegmentsBesidesLayers = 5u;
 
 /**
  * @name Byte positions inside the header
@@ -43,6 +46,8 @@ constexpr core::u32 kHeaderContext = 48u;
 constexpr core::u32 kHeaderVocabSize = 52u;
 constexpr core::u32 kHeaderVocabText = 56u;
 constexpr core::u32 kHeaderNormEpsilon = 60u;
+constexpr core::u32 kHeaderMergeCount = 64u;
+constexpr core::u32 kHeaderPreTokenizer = 68u;
 /** @} */
 
 /**
@@ -104,10 +109,10 @@ bool alignmentAccepted(core::u32 alignmentLog2) noexcept
 
 /**
  * @brief The zero-based @p index -th entry a dense model of @p shape holds, its offset and signature at 0: the
- *        vocabulary, the embedding, each layer's attention, the final norm, the rotary table, then each layer's
- *        expert.
+ *        vocabulary, the embedding, each layer's attention, the final norm, the rotary table, each layer's expert,
+ *        then the merges.
  */
-ModelSegment expectedSegment(const ModelConfig &shape, core::u32 vocabTextBytes, core::u32 index) noexcept
+ModelSegment expectedSegment(const ModelConfig &shape, const ModelTokenizerExtents &tokenizer, core::u32 index) noexcept
 {
     const core::u64 dim = shape.dim;
     ModelSegment segment{};
@@ -115,7 +120,7 @@ ModelSegment expectedSegment(const ModelConfig &shape, core::u32 vocabTextBytes,
     if (index == 0u)
     {
         segment.role = ModelSegmentRole::Vocabulary;
-        segment.length = static_cast<core::u64>(shape.vocabSize) * kVocabEntryBytes + vocabTextBytes;
+        segment.length = static_cast<core::u64>(shape.vocabSize) * kVocabEntryBytes + tokenizer.vocabTextBytes;
     }
     else if (index == 1u)
     {
@@ -137,6 +142,11 @@ ModelSegment expectedSegment(const ModelConfig &shape, core::u32 vocabTextBytes,
     {
         segment.role = ModelSegmentRole::Rotary;
         segment.length = static_cast<core::u64>(shape.rotaryPairs()) * kRotaryEntryBytes;
+    }
+    else if (index == 2u * shape.layers + 4u)
+    {
+        segment.role = ModelSegmentRole::Merges;
+        segment.length = static_cast<core::u64>(tokenizer.mergeCount) * kMergeEntryBytes;
     }
     else
     {
@@ -184,6 +194,8 @@ ModelImageHeader readHeader(const core::u8 *bytes) noexcept
     header.shape.vocabSize = wordAt(bytes, kHeaderVocabSize);
     header.vocabTextBytes = wordAt(bytes, kHeaderVocabText);
     header.shape.normEpsilon = wordAt(bytes, kHeaderNormEpsilon);
+    header.mergeCount = wordAt(bytes, kHeaderMergeCount);
+    header.preTokenizer = static_cast<PreTokenizer>(wordAt(bytes, kHeaderPreTokenizer));
     return header;
 }
 
@@ -198,6 +210,8 @@ ModelImageVerdict judgeHeader(const core::u8 *bytes, core::u64 size, const Model
         return ModelImageVerdict::BadAlignment;
     if (!header.shape.valid() || header.vocabTextBytes == 0u)
         return ModelImageVerdict::BadShape;
+    if (!isKnownPreTokenizer(wordAt(bytes, kHeaderPreTokenizer)))
+        return ModelImageVerdict::UnknownPreTokenizer;
     if (header.imageBytes != size)
         return ModelImageVerdict::BadImageBytes;
     return ModelImageVerdict::Accepted;
@@ -210,7 +224,8 @@ ModelImageVerdict judgeHeader(const core::u8 *bytes, core::u64 size, const Model
 ModelImageVerdict judgeEntry(const ModelImageHeader &header, core::u32 index, const ModelSegment &segment,
                              core::u32 reserved, core::u64 cursor, core::u64 size) noexcept
 {
-    const ModelSegment expected = expectedSegment(header.shape, header.vocabTextBytes, index);
+    const ModelSegment expected =
+        expectedSegment(header.shape, ModelTokenizerExtents{header.vocabTextBytes, header.mergeCount}, index);
 
     if (segment.role != expected.role || segment.residency != expected.residency || segment.layer != expected.layer ||
         segment.expert != expected.expert || reserved != 0u)
@@ -248,29 +263,29 @@ core::u32 modelImageSegmentCount(const ModelConfig &shape) noexcept
     return count <= 0xFFFFFFFFull ? static_cast<core::u32>(count) : 0u;
 }
 
-ModelSegment placeModelSegment(const ModelConfig &shape, core::u32 vocabTextBytes, core::u32 alignmentLog2,
-                               core::u32 index, core::u64 &cursor) noexcept
+ModelSegment placeModelSegment(const ModelConfig &shape, const ModelTokenizerExtents &tokenizer,
+                               core::u32 alignmentLog2, core::u32 index, core::u64 &cursor) noexcept
 {
-    ModelSegment segment = expectedSegment(shape, vocabTextBytes, index);
+    ModelSegment segment = expectedSegment(shape, tokenizer, index);
 
     segment.offset = alignedUp(cursor, segmentAlignment(segment.residency, alignmentLog2));
     cursor = segment.offset + segment.length;
     return segment;
 }
 
-core::u64 layOutModelImage(const ModelConfig &shape, core::u32 vocabTextBytes, core::u32 alignmentLog2,
+core::u64 layOutModelImage(const ModelConfig &shape, const ModelTokenizerExtents &tokenizer, core::u32 alignmentLog2,
                            ModelSegment *segments, core::u32 capacity) noexcept
 {
     const core::u32 count = modelImageSegmentCount(shape);
 
-    if (!shape.valid() || vocabTextBytes == 0u || !alignmentAccepted(alignmentLog2) || count == 0u ||
+    if (!shape.valid() || tokenizer.vocabTextBytes == 0u || !alignmentAccepted(alignmentLog2) || count == 0u ||
         (segments != nullptr && count > capacity))
         return 0u;
 
     core::u64 cursor = kModelImageHeaderBytes + static_cast<core::u64>(count) * kModelSegmentEntryBytes;
     for (core::u32 index = 0u; index < count; ++index)
     {
-        const ModelSegment segment = placeModelSegment(shape, vocabTextBytes, alignmentLog2, index, cursor);
+        const ModelSegment segment = placeModelSegment(shape, tokenizer, alignmentLog2, index, cursor);
         if (segments != nullptr)
             segments[index] = segment;
     }
@@ -352,6 +367,8 @@ void writeModelImageHeader(core::u8 *image, const ModelImageHeader &header) noex
     putWordAt(image, kHeaderVocabSize, header.shape.vocabSize);
     putWordAt(image, kHeaderVocabText, header.vocabTextBytes);
     putWordAt(image, kHeaderNormEpsilon, header.shape.normEpsilon);
+    putWordAt(image, kHeaderMergeCount, header.mergeCount);
+    putWordAt(image, kHeaderPreTokenizer, static_cast<core::u32>(header.preTokenizer));
 }
 
 void writeModelSegmentEntry(core::u8 *image, core::u32 index, const ModelSegment &segment) noexcept
@@ -397,6 +414,7 @@ const char *modelImageVerdictName(ModelImageVerdict verdict) noexcept
     case ModelImageVerdict::SegmentMisaligned: return "segment_misaligned";
     case ModelImageVerdict::SegmentOverlaps: return "segment_overlaps";
     case ModelImageVerdict::SegmentOutside: return "segment_outside";
+    case ModelImageVerdict::UnknownPreTokenizer: return "unknown_pre_tokenizer";
     }
     return "unknown";
 }

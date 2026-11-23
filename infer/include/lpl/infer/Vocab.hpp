@@ -31,8 +31,8 @@ namespace lpl::infer {
 /// Returned where a token identifier is expected and none applies.
 inline constexpr core::u32 kNoToken = 0xFFFFFFFFu;
 
-/// Longest byte string one token may stand for.
-inline constexpr core::u32 kMaxTokenBytes = 16u;
+/** Longest byte string one token may stand for: the longest tokens of Qwen2.5 and Llama 3.2 are 128 bytes. */
+inline constexpr core::u32 kMaxTokenBytes = 128u;
 
 /**
  * @struct VocabEntry
@@ -134,7 +134,7 @@ public:
      *
      * The primitive the tokenizer is built on. Returning the length as well as the
      * identifier saves the caller re-deriving it, which is where a greedy tokenizer
-     * would otherwise be able to disagree with itself.
+     * would otherwise be able to disagree with itself. No length past the table's longest token is tried.
      *
      * @param bytes     Text to match against.
      * @param available Bytes readable from it.
@@ -172,6 +172,7 @@ private:
     const core::u32 *_sorted{nullptr};
     core::u32 _count{0u};
     core::u32 _blobBytes{0u};
+    core::u32 _longestPrefixBytes{0u};
 };
 
 } // namespace lpl::infer

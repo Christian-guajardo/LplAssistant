@@ -21,6 +21,7 @@ constexpr lpl::core::u8 kMadeUpSymbols[] = {' ',   'e',   't',   'a',   'o',   '
 constexpr lpl::core::u32 kMadeUpSymbolCount = sizeof(kMadeUpSymbols) / sizeof(kMadeUpSymbols[0]);
 
 constexpr lpl::core::u32 kOrderedWindows = 1000u;
+constexpr lpl::core::u32 kMadeUpWindowBytes = 16u; ///< The longest window, as long as LplAssistant 0.6.0's tokens.
 constexpr lpl::core::u32 kLongTokens = 48u;
 constexpr lpl::core::u32 kLongTailBytes = 8u;
 constexpr lpl::core::u32 kLongLengthStride = 5u;
@@ -33,8 +34,9 @@ constexpr lpl::core::u32 kLongRegionBytes = lpl::infer::kMaxTokenBytes + kLongTa
 constexpr lpl::core::u8 kHighTailByte = 0xFFu;
 constexpr lpl::core::u8 kLowTailByte = 0x01u;
 
-/** Sixteen bytes every long token starts with, so the order of those tokens is decided past kMaxTokenBytes. */
-constexpr char kLongHead[] = "the-sixteen-head";
+/** The kMaxTokenBytes bytes every long token starts with, so the order of those tokens is decided past them. */
+constexpr char kLongHead[] = "the-long-head-every-long-token-starts-with-so-that-their-order-is-decided-past-"
+                             "kmaxtokenbytes-0123456789abcdefghijklmnopqrstuvwx";
 static_assert(sizeof(kLongHead) - 1u == lpl::infer::kMaxTokenBytes, "the long head spans exactly kMaxTokenBytes");
 
 /** The token repeated kRepeatedTokens times: a high byte, a continuation byte and a space. */
@@ -47,7 +49,9 @@ constexpr lpl::core::u32 kEdgeTokens = kLongTokens + kRepeatedTokens + kEmptyTok
 /** Texts no made-up vocabulary holds: a byte below every symbol, one between them, and one past every long token. */
 constexpr char kAbsentLow[] = "\x01";
 constexpr char kAbsentBetween[] = "zz";
-constexpr char kAbsentLong[] = "the-sixteen-head\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF";
+constexpr char kAbsentLong[] = "the-long-head-every-long-token-starts-with-so-that-their-order-is-decided-past-"
+                               "kmaxtokenbytes-0123456789abcdefghijklmnopqrstuvwx"
+                               "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF";
 
 constexpr lpl::core::u32 kAThousand = 1000u;
 constexpr lpl::core::u32 kTenThousand = 10000u;
@@ -115,15 +119,15 @@ void foldWord(lpl::core::u32 &hash, lpl::core::u32 word) { hash = (hash ^ word) 
  * @brief Claims a vocabulary of @p windows tokens over a made-up text, with room for @p extraTokens more tokens and
  *        @p extraTextBytes more bytes of text after them.
  *
- * Token i starts at byte i of the text and spans 1 to kMaxTokenBytes bytes: the tokens arrive in no text order, the
- * short ones repeat, and the long ones share their first bytes, as the runs of a real text do.
+ * Token i starts at byte i of the text and spans 1 to kMadeUpWindowBytes bytes: the tokens arrive in no text order,
+ * the short ones repeat, and the long ones share their first bytes, as the runs of a real text do.
  *
  * @return Whether the arena held it.
  */
 [[nodiscard]] bool makeUpWindows(lpl::infer::TensorArena &arena, lpl::core::u32 windows, lpl::core::u32 extraTokens,
                                  lpl::core::u32 extraTextBytes, MadeUpVocabulary &out)
 {
-    const lpl::core::u32 windowTextBytes = windows + lpl::infer::kMaxTokenBytes;
+    const lpl::core::u32 windowTextBytes = windows + kMadeUpWindowBytes;
 
     out.textBytes = windowTextBytes + extraTextBytes;
     out.count = windows + extraTokens;
@@ -137,7 +141,7 @@ void foldWord(lpl::core::u32 &hash, lpl::core::u32 word) { hash = (hash ^ word) 
     for (lpl::core::u32 at = 0u; at < windowTextBytes; ++at)
         out.text[at] = madeUpByte(state);
     for (lpl::core::u32 token = 0u; token < windows; ++token)
-        out.entries[token] = lpl::infer::VocabEntry{token, 1u + nextDraw(state) % lpl::infer::kMaxTokenBytes};
+        out.entries[token] = lpl::infer::VocabEntry{token, 1u + nextDraw(state) % kMadeUpWindowBytes};
     return true;
 }
 
@@ -156,13 +160,13 @@ lpl::core::u32 writeLongRegion(char *text, lpl::core::u32 at, lpl::core::u8 tail
 
 /**
  * @brief Appends the tokens no window makes, after @p windows of them: tokens past kMaxTokenBytes that share their
- *        first sixteen bytes and part from a high byte or a low one, a token repeated more times than a small sort
- *        sees at once, an empty token, and a comb of tokens that leave the long head one byte further each, so the
- *        long tokens part from their neighbours at every one of their first kMaxTokenBytes bytes.
+ *        first kMaxTokenBytes bytes and part from a high byte or a low one, a token repeated more times than a small
+ * sort sees at once, an empty token, and a comb of tokens that leave the long head one byte further each, so the long
+ * tokens part from their neighbours at every one of their first kMaxTokenBytes bytes.
  */
 void addEdgeTokens(MadeUpVocabulary &vocabulary, lpl::core::u32 windows)
 {
-    const lpl::core::u32 high = writeLongRegion(vocabulary.text, windows + lpl::infer::kMaxTokenBytes, kHighTailByte);
+    const lpl::core::u32 high = writeLongRegion(vocabulary.text, windows + kMadeUpWindowBytes, kHighTailByte);
     const lpl::core::u32 low = writeLongRegion(vocabulary.text, high + kLongRegionBytes, kLowTailByte);
     const lpl::core::u32 repeated = low + kLongRegionBytes;
 
@@ -312,7 +316,7 @@ void referenceOrder(const MadeUpVocabulary &vocabulary, lpl::core::u32 *order)
  */
 void checkMadeUpVocabulary(lpl::testing::Test &test, lpl::core::u32 count, lpl::core::u32 expectedSignature)
 {
-    lpl::infer::TensorArena arena{madeUpArenaBytes(count, count + lpl::infer::kMaxTokenBytes)};
+    lpl::infer::TensorArena arena{madeUpArenaBytes(count, count + kMadeUpWindowBytes)};
     MadeUpVocabulary vocabulary{};
     lpl::infer::Vocab vocab;
 
@@ -345,7 +349,7 @@ void checkMadeUpVocabulary(lpl::testing::Test &test, lpl::core::u32 count, lpl::
 LPL_TEST(the_index_orders_unsigned_bytes_the_shorter_first_and_equal_tokens_by_identifier)
 {
     const lpl::core::u32 count = kOrderedWindows + kEdgeTokens;
-    const lpl::core::u32 textBytes = kOrderedWindows + lpl::infer::kMaxTokenBytes + kEdgeTextBytes;
+    const lpl::core::u32 textBytes = kOrderedWindows + kMadeUpWindowBytes + kEdgeTextBytes;
     lpl::infer::TensorArena arena{madeUpArenaBytes(count, textBytes) + count * sizeof(lpl::core::u32)};
     MadeUpVocabulary vocabulary{};
     lpl::infer::Vocab vocab;
@@ -428,7 +432,7 @@ LPL_TEST(a_hundred_thousand_made_up_tokens_are_found_where_today_s_order_puts_th
 LPL_TEST(a_sort_without_room_for_its_waiting_runs_compares_them_and_counts_each)
 {
     const lpl::core::u32 count = kOrderedWindows + kEdgeTokens;
-    const lpl::core::u32 textBytes = kOrderedWindows + lpl::infer::kMaxTokenBytes + kEdgeTextBytes;
+    const lpl::core::u32 textBytes = kOrderedWindows + kMadeUpWindowBytes + kEdgeTextBytes;
     lpl::infer::TensorArena arena{madeUpArenaBytes(count, textBytes) + 3u * count * sizeof(lpl::core::u32)};
     MadeUpVocabulary vocabulary{};
 

@@ -33,6 +33,7 @@
 
 #        include <lpl/infer/Tensor.hpp>
 #        include <lpl/infer/TensorArena.hpp>
+#        include <lpl/infer/Tokenizer.hpp>
 #        include <lpl/infer/Vocab.hpp>
 
 #        include <bit>
@@ -57,6 +58,7 @@ enum class ModelReadVerdict : core::u32 {
     SignatureMismatch = 4u, ///< A segment's bytes are not the ones its entry signs.
     VocabularyRefused = 5u, ///< A token is empty, longer than a token may be, or past the vocabulary's text.
     ArenaExhausted = 6u,    ///< The arena cannot hold what the reading claims.
+    MergesRefused = 7u,     ///< A merge names a token past the vocabulary, is not the concatenation, or repeats a pair.
 };
 
 /**
@@ -86,8 +88,8 @@ inline constexpr core::u32 kModelViewAlignment = alignof(QuantBlock);
 /**
  * @brief The name a boot line gives a reading's verdict.
  * @param verdict A verdict.
- * @return "read", "misaligned", "big_endian_host", "image_refused", "signature_mismatch", "vocabulary_refused" or
- *         "arena_exhausted"; "unknown" otherwise.
+ * @return "read", "misaligned", "big_endian_host", "image_refused", "signature_mismatch", "vocabulary_refused",
+ *         "arena_exhausted" or "merges_refused"; "unknown" otherwise.
  */
 [[nodiscard]] const char *modelReadVerdictName(ModelReadVerdict verdict) noexcept;
 
@@ -179,6 +181,21 @@ public:
      * @return false when the shape is invalid or the arena is exhausted.
      */
     bool synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab &vocab, core::u32 seed);
+
+    /**
+     * @brief Derives every weight from a seed, as the overload without merges does, and carries @p merges and
+     *        @p preTokenizer into the image it writes.
+     *
+     * @param arena        Storage for the weights.
+     * @param shape        The transformer's extents.
+     * @param vocab        An already-built table; its size must match @c shape.vocabSize.
+     * @param merges       Its ranked merges, indexed against @p vocab; borrowed, so they must outlive the model.
+     * @param preTokenizer How text splits before it is segmented.
+     * @param seed         Master seed.
+     * @return false when the shape is invalid or the arena is exhausted.
+     */
+    bool synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab &vocab, const BytePairMerges &merges,
+                    PreTokenizer preTokenizer, core::u32 seed);
 
     /**
      * @brief Reads a baked image into @p arena.
@@ -274,6 +291,18 @@ public:
     [[nodiscard]] const Vocab &vocab() const noexcept { return _vocab; }
 
     /**
+     * @brief The ranked merges the vocabulary is encoded by.
+     * @return The merges; a table that holds none for a vocabulary segmented by longest match.
+     */
+    [[nodiscard]] const BytePairMerges &merges() const noexcept { return _merges; }
+
+    /**
+     * @brief How text splits before it is segmented.
+     * @return The pre-tokenizer; WholeText for a model a seed derives without merges.
+     */
+    [[nodiscard]] PreTokenizer preTokenizer() const noexcept { return _preTokenizer; }
+
+    /**
      * @brief One block's tensors.
      * @param index Block index.
      * @return Its weights.
@@ -343,6 +372,8 @@ private:
 
     ModelConfig _config{};
     Vocab _vocab{};
+    BytePairMerges _merges{};
+    PreTokenizer _preTokenizer{PreTokenizer::WholeText};
     QuantMatrixView _embedding{};
     ConstVectorView _finalNorm{};
     RotaryFrequencies _rotary{};

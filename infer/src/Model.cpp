@@ -34,6 +34,10 @@ static_assert(sizeof(VocabEntry) == 8u && alignof(VocabEntry) <= kModelViewAlign
               "a token's entry in place is its offset then its length, two words aligned like a block");
 static_assert(sizeof(core::u32) == 4u && alignof(core::u32) <= kModelViewAlignment,
               "a rotary frequency in place is one little-endian word, aligned like a block");
+static_assert(sizeof(BytePairMerge) == 12u && alignof(BytePairMerge) <= kModelViewAlignment &&
+                  offsetof(BytePairMerge, left) == 0u && offsetof(BytePairMerge, right) == 4u &&
+                  offsetof(BytePairMerge, result) == 8u && std::is_trivially_copyable_v<BytePairMerge>,
+              "a merge in place is its left, right and result words, as the writer puts them");
 
 /**
  * @brief Per-tensor stream salts.
@@ -418,6 +422,48 @@ ModelReadVerdict viewVocabulary(TensorArena &arena, const core::u8 *cursor, core
 }
 
 /**
+ * @brief The reading's verdict on indexing a merge list.
+ */
+ModelReadVerdict mergesVerdict(BytePairMergesVerdict verdict) noexcept
+{
+    if (verdict == BytePairMergesVerdict::Indexed)
+        return ModelReadVerdict::Read;
+    return verdict == BytePairMergesVerdict::ArenaExhausted ? ModelReadVerdict::ArenaExhausted :
+                                                              ModelReadVerdict::MergesRefused;
+}
+
+/**
+ * @brief Reads @p count merges out of an image and into the arena, then indexes them against @p vocab.
+ * @return Read; MergesRefused when a merge does not hold; ArenaExhausted.
+ */
+ModelReadVerdict copyMerges(TensorArena &arena, const core::u8 *&cursor, core::u32 count, const Vocab &vocab,
+                            BytePairMerges &out)
+{
+    BytePairMerge *const merges = count != 0u ? arena.claim<BytePairMerge>(count) : nullptr;
+    if (count != 0u && merges == nullptr)
+        return ModelReadVerdict::ArenaExhausted;
+
+    for (core::u32 i = 0u; i < count; ++i)
+    {
+        merges[i].left = takeWord(cursor);
+        merges[i].right = takeWord(cursor);
+        merges[i].result = takeWord(cursor);
+    }
+    return mergesVerdict(out.borrow(arena, merges, count, vocab));
+}
+
+/**
+ * @brief Indexes @p count merges where they lie in an image against @p vocab.
+ * @return Read; MergesRefused when a merge does not hold; ArenaExhausted.
+ */
+ModelReadVerdict viewMerges(TensorArena &arena, const core::u8 *cursor, core::u32 count, const Vocab &vocab,
+                            BytePairMerges &out)
+{
+    const BytePairMerge *const merges = count != 0u ? reinterpret_cast<const BytePairMerge *>(cursor) : nullptr;
+    return mergesVerdict(out.borrow(arena, merges, count, vocab));
+}
+
+/**
  * @brief Reads a layer's attention segment, its two norms then its query, key, value and output matrices, into the
  *        arena.
  * @return Read, or ArenaExhausted.
@@ -475,6 +521,7 @@ void viewExpert(const core::u8 *&cursor, const ModelConfig &shape, LayerWeights 
 struct ImageWeights {
     LayerWeights *layers{nullptr}; ///< One per layer, in the arena.
     Vocab vocab{};                 ///< The token table.
+    BytePairMerges merges{};       ///< The ranked merges, indexed against the token table.
     QuantMatrixView embedding{};   ///< The tied embedding and output matrix.
     ConstVectorView finalNorm{};   ///< The norm before the output head.
     RotaryFrequencies rotary{};    ///< How far each pair of a head turns per position.
@@ -506,6 +553,7 @@ ModelReadVerdict copySegment(TensorArena &arena, const core::u8 *bytes, const Mo
     case ModelSegmentRole::Rotary:
         return copyRotary(arena, cursor, shape.rotaryPairs(), weights.rotary) ? ModelReadVerdict::Read :
                                                                                 ModelReadVerdict::ArenaExhausted;
+    case ModelSegmentRole::Merges: return copyMerges(arena, cursor, header.mergeCount, weights.vocab, weights.merges);
     }
     return ModelReadVerdict::ImageRefused;
 }
@@ -537,8 +585,17 @@ ModelReadVerdict viewSegment(TensorArena &arena, const core::u8 *bytes, const Mo
     case ModelSegmentRole::Rotary:
         viewRotary(cursor, shape.rotaryPairs(), weights.rotary);
         return ModelReadVerdict::Read;
+    case ModelSegmentRole::Merges: return viewMerges(arena, cursor, header.mergeCount, weights.vocab, weights.merges);
     }
     return ModelReadVerdict::ImageRefused;
+}
+
+/**
+ * @brief What sizes @p model's tokenizer in its image: the bytes of its vocabulary's text and its merges.
+ */
+ModelTokenizerExtents tokenizerExtentsOf(const Model &model) noexcept
+{
+    return ModelTokenizerExtents{model.vocab().blobBytes(), model.merges().size()};
 }
 
 /**
@@ -575,6 +632,14 @@ void writeSegment(core::u8 *at, const Model &model, const ModelSegment &segment)
         writeMatrix(cursor, model.layer(segment.layer - 1u).down);
         return;
     case ModelSegmentRole::Rotary: writeRotary(cursor, model.rotaryFrequencies()); return;
+    case ModelSegmentRole::Merges:
+        for (core::u32 i = 0u; i < model.merges().size(); ++i)
+        {
+            putWord(cursor, model.merges().merges()[i].left);
+            putWord(cursor, model.merges().merges()[i].right);
+            putWord(cursor, model.merges().merges()[i].result);
+        }
+        return;
     }
 }
 
@@ -629,7 +694,20 @@ bool Model::synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab
 
     _config = shape;
     _vocab = vocab;
+    _merges = BytePairMerges{};
+    _preTokenizer = PreTokenizer::WholeText;
     _layers = layers;
+    return true;
+}
+
+bool Model::synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab &vocab, const BytePairMerges &merges,
+                       PreTokenizer preTokenizer, core::u32 seed)
+{
+    if (!synthesise(arena, shape, vocab, seed))
+        return false;
+
+    _merges = merges;
+    _preTokenizer = preTokenizer;
     return true;
 }
 
@@ -660,6 +738,8 @@ ModelReadReport Model::readImage(TensorArena &arena, const core::u8 *bytes, core
 
     _config = inspection.header.shape;
     _vocab = weights.vocab;
+    _merges = weights.merges;
+    _preTokenizer = inspection.header.preTokenizer;
     _embedding = weights.embedding;
     _finalNorm = weights.finalNorm;
     _rotary = weights.rotary;
@@ -697,6 +777,7 @@ const char *modelReadVerdictName(ModelReadVerdict verdict) noexcept
     case ModelReadVerdict::SignatureMismatch: return "signature_mismatch";
     case ModelReadVerdict::VocabularyRefused: return "vocabulary_refused";
     case ModelReadVerdict::ArenaExhausted: return "arena_exhausted";
+    case ModelReadVerdict::MergesRefused: return "merges_refused";
     }
     return "unknown";
 }
@@ -719,7 +800,7 @@ core::u32 Model::blobBytes(core::u32 alignmentLog2) const noexcept
     if (!ready())
         return 0u;
 
-    const core::u64 bytes = layOutModelImage(_config, _vocab.blobBytes(), alignmentLog2, nullptr, 0u);
+    const core::u64 bytes = layOutModelImage(_config, tokenizerExtentsOf(*this), alignmentLog2, nullptr, 0u);
     return bytes <= 0xFFFFFFFFull ? static_cast<core::u32>(bytes) : 0u;
 }
 
@@ -740,7 +821,7 @@ core::u32 Model::writeBlob(core::u8 *out, core::u32 capacity, core::u32 alignmen
         out[i] = 0u;
     for (core::u32 index = 0u; index < count; ++index)
     {
-        ModelSegment segment = placeModelSegment(_config, _vocab.blobBytes(), alignmentLog2, index, cursor);
+        ModelSegment segment = placeModelSegment(_config, tokenizerExtentsOf(*this), alignmentLog2, index, cursor);
         writeSegment(out + segment.offset, *this, segment);
         segment.signature = modelSegmentSignature(out, segment);
         writeModelSegmentEntry(out, index, segment);
@@ -752,6 +833,8 @@ core::u32 Model::writeBlob(core::u8 *out, core::u32 capacity, core::u32 alignmen
     header.imageBytes = needed;
     header.shape = _config;
     header.vocabTextBytes = _vocab.blobBytes();
+    header.mergeCount = _merges.size();
+    header.preTokenizer = _preTokenizer;
     writeModelImageHeader(out, header);
     return needed;
 }
