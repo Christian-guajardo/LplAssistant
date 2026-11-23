@@ -76,6 +76,27 @@ core::u32 slotsFor(core::u32 count) noexcept
 }
 
 /**
+ * @brief The longest run of occupied slots of an index of @p slotCount slots, a power of two, wrapping round its end:
+ *        a lookup that starts in it probes at most that many slots and one more. One slot at least is empty.
+ */
+core::u32 longestOccupiedRun(const core::u32 *slots, core::u32 slotCount) noexcept
+{
+    const core::u32 mask = slotCount - 1u;
+    core::u32 empty = 0u;
+    while (slots[empty] != 0u)
+        ++empty;
+
+    core::u32 run = 0u;
+    core::u32 longest = 0u;
+    for (core::u32 step = 1u; step <= slotCount; ++step)
+    {
+        run = slots[(empty + step) & mask] != 0u ? run + 1u : 0u;
+        longest = run > longest ? run : longest;
+    }
+    return longest;
+}
+
+/**
  * @brief Whether @p merge joins two tokens of @p vocab into a third whose bytes are theirs one after the other.
  */
 BytePairMergesVerdict judgeMerge(const BytePairMerge &merge, const Vocab &vocab) noexcept
@@ -447,8 +468,6 @@ BytePairMergesVerdict BytePairMerges::borrow(TensorArena &arena, const BytePairM
     core::u32 *const slots = arena.claim<core::u32>(slotCount);
     if (slots == nullptr)
         return BytePairMergesVerdict::ArenaExhausted;
-    for (core::u32 slot = 0u; slot < slotCount; ++slot)
-        slots[slot] = 0u;
 
     const core::u32 mask = slotCount - 1u;
     for (core::u32 rank = 0u; rank < count; ++rank)
@@ -459,14 +478,18 @@ BytePairMergesVerdict BytePairMerges::borrow(TensorArena &arena, const BytePairM
             return verdict;
 
         core::u32 slot = pairSlot(merge.left, merge.right, mask);
-        for (; slots[slot] != 0u; slot = (slot + 1u) & mask)
+        for (core::u32 probes = 1u; slots[slot] != 0u; slot = (slot + 1u) & mask, ++probes)
         {
             const BytePairMerge &held = merges[slots[slot] - 1u];
             if (held.left == merge.left && held.right == merge.right)
                 return BytePairMergesVerdict::RepeatedPair;
+            if (probes > kBytePairMostProbes)
+                return BytePairMergesVerdict::Crowded;
         }
         slots[slot] = rank + 1u;
     }
+    if (longestOccupiedRun(slots, slotCount) > kBytePairMostProbes)
+        return BytePairMergesVerdict::Crowded;
 
     _merges = merges;
     _slots = slots;

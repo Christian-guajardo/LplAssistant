@@ -33,10 +33,17 @@ namespace lpl::infer {
 inline constexpr core::u32 kNoMerge = 0xFFFFFFFFu;
 
 /**
- * Symbols one word is merged in at once: a word with more symbols is cut and each part merged apart. The longest word
- * measured on 6,382 lines of prose, code and eleven scripts is 80 bytes (LplAssistant#105).
+ * Symbols one word is merged in at once: a word with more symbols is cut, each part merged apart, and the cut counted
+ * (bytePairWordsCut).
  */
 inline constexpr core::u32 kBytePairWorkspaceSymbols = 4096u;
+
+/**
+ * The longest run of occupied slots an index of merges may hold, so that looking a pair up probes at most one slot
+ * more. A list the hash spreads leaves far shorter runs at a load of a half at most; a longer run is a list made to
+ * collide, refused rather than probed.
+ */
+inline constexpr core::u32 kBytePairMostProbes = 128u;
 
 /**
  * @struct BytePairMerge
@@ -58,6 +65,7 @@ enum class BytePairMergesVerdict : core::u32 {
     NotTheConcatenation = 2u, ///< A merge's result is not its left token's bytes then its right token's.
     RepeatedPair = 3u,        ///< Two merges join the same pair.
     ArenaExhausted = 4u,      ///< The arena cannot hold the index.
+    Crowded = 5u,             ///< The pairs crowd the index into a run longer than kBytePairMostProbes slots.
 };
 
 /**
@@ -78,7 +86,8 @@ public:
      * @param merges The merges in the order of their ranks; nullptr only when @p count is 0.
      * @param count  Merges.
      * @param vocab  The vocabulary every token of a merge belongs to.
-     * @return Indexed; otherwise what was refused, and the table holds no merge.
+     * @return Indexed; otherwise what was refused, and the table holds no merge. A null list with a count, a caller's
+     *         error no image can make, is refused as ArenaExhausted.
      */
     [[nodiscard]] BytePairMergesVerdict borrow(TensorArena &arena, const BytePairMerge *merges, core::u32 count,
                                                const Vocab &vocab);
@@ -212,8 +221,8 @@ public:
      * that the model has never seen and cannot have learnt anything about. Merging drops a byte that has no
      * single-byte token the same way, as the model's own tokenizer does when it has no unknown token.
      *
-     * Not reentrant once merges are bound: a word is merged in the workspace the binding claimed, so one call at a
-     * time per tokenizer.
+     * Not reentrant once merges are bound: a word is merged in the workspace the binding claimed, which a copy of the
+     * tokenizer shares, so one call at a time per tokenizer and its copies.
      *
      * @param text       Bytes to segment.
      * @param bytes      How many.

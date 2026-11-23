@@ -11,7 +11,7 @@ Commands:
     fixture        write tests/infer/fixtures/smollm2_byte_pairs.hpp: SmolLM2's merges that a set of prompts reaches,
                    and the words and ids Hugging Face tokenizers gives each prompt
     check-classes  compare the class of every code point with what Hugging Face's pre-tokenizer makes of it
-    check          write both files into a temporary directory and fail when they differ from the committed ones
+    check          compute both files again and fail when they differ from the committed ones, writing nothing
 
 The inputs are downloaded once into --cache (~/.cache/lplassistant/byte-pairs) and refused when their SHA-256 is not
 the pinned one. Each file is formatted as every C++ file of LplAssistant is, by clang-format 18.1.3 with LplKernel's

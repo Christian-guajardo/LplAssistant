@@ -369,6 +369,69 @@ lpl::core::u32 mergeLowestRankFirst(const MadeUpMerges &table, lpl::core::u32 *s
     }
 }
 
+/** Single-byte tokens a stair of pairs is drawn from: the 64 bytes from 0. */
+constexpr lpl::core::u32 kStairAlphabet = 64u;
+
+/** The first byte of a stair's alphabet. */
+constexpr char kStairFirstByte = '0';
+
+/**
+ * @brief The slot the encoder's hash gives the pair @p left, @p right in an index of @p mask + 1 slots, worked again
+ *        here from its definition.
+ */
+[[nodiscard]] lpl::core::u32 stairSlot(lpl::core::u32 left, lpl::core::u32 right, lpl::core::u32 mask)
+{
+    lpl::core::u32 mixed = left * 0x9E3779B1u ^ right * 0x85EBCA77u;
+    mixed ^= mixed >> 15;
+    mixed *= 0xC2B2AE3Du;
+    mixed ^= mixed >> 13;
+    return mixed & mask;
+}
+
+/**
+ * @brief Indexes @p count merges of two single bytes each, chosen so that pair i hashes to slot i of their index.
+ * @return The verdict; Indexed holds nothing to keep, the arena only lends room.
+ */
+[[nodiscard]] lpl::infer::BytePairMergesVerdict indexStair(lpl::infer::TensorArena &arena, lpl::core::u32 count)
+{
+    lpl::core::u32 slots = 1u;
+    while (slots < 2u * count)
+        slots <<= 1;
+    char *const text = arena.claim<char>(kStairAlphabet + 2u * count);
+    lpl::infer::VocabEntry *const entries = arena.claim<lpl::infer::VocabEntry>(kStairAlphabet + count);
+    lpl::infer::BytePairMerge *const merges = arena.claim<lpl::infer::BytePairMerge>(count);
+    bool *const used = arena.claim<bool>(kStairAlphabet * kStairAlphabet);
+    if (text == nullptr || entries == nullptr || merges == nullptr || used == nullptr)
+        return lpl::infer::BytePairMergesVerdict::ArenaExhausted;
+
+    for (lpl::core::u32 byte = 0u; byte < kStairAlphabet; ++byte)
+    {
+        text[byte] = static_cast<char>(kStairFirstByte + byte);
+        entries[byte] = lpl::infer::VocabEntry{byte, 1u};
+    }
+    for (lpl::core::u32 step = 0u; step < count; ++step)
+    {
+        lpl::core::u32 pair = 0u;
+        while (pair < kStairAlphabet * kStairAlphabet &&
+               (used[pair] || stairSlot(pair / kStairAlphabet, pair % kStairAlphabet, slots - 1u) != step))
+            ++pair;
+        if (pair == kStairAlphabet * kStairAlphabet)
+            return lpl::infer::BytePairMergesVerdict::ArenaExhausted;
+        used[pair] = true;
+        const lpl::core::u32 at = kStairAlphabet + 2u * step;
+        text[at] = static_cast<char>(kStairFirstByte + pair / kStairAlphabet);
+        text[at + 1u] = static_cast<char>(kStairFirstByte + pair % kStairAlphabet);
+        entries[kStairAlphabet + step] = lpl::infer::VocabEntry{at, 2u};
+        merges[step] = lpl::infer::BytePairMerge{pair / kStairAlphabet, pair % kStairAlphabet, kStairAlphabet + step};
+    }
+
+    lpl::infer::Vocab vocab;
+    lpl::infer::BytePairMerges table;
+    if (!vocab.borrow(arena, text, kStairAlphabet + 2u * count, entries, kStairAlphabet + count))
+        return lpl::infer::BytePairMergesVerdict::ArenaExhausted;
+    return table.borrow(arena, merges, count, vocab);
+}
+
 /**
  * @struct InvalidCase
  * @brief A sequence of UTF-8 put between "ab" and "cd", and the pieces the five or more bytes make.
@@ -1016,7 +1079,73 @@ LPL_TEST(a_vocabulary_without_merges_is_still_segmented_by_longest_match)
     for (lpl::core::u32 i = 0u; same && i < boundCount; ++i)
         same = boundIds[i] == aloneIds[i];
 
+    lpl::infer::Tokenizer piecewise;
+    const char hundred[] = "100";
+    const lpl::core::u32 one = vocab.find("1", 1u);
+    const lpl::core::u32 zero = vocab.find("0", 1u);
+    const lpl::core::u32 doubleZero = vocab.find("00", 2u);
+    lpl::core::u32 wholeIds[4];
+    lpl::core::u32 pieceIds[4];
+    lpl::core::u32 wholeSkipped = 0u;
+    lpl::core::u32 pieceSkipped = 0u;
+    const lpl::core::u32 wholeCount = bound.encode(hundred, 3u, wholeIds, 4u, wholeSkipped);
+    const bool piecewiseBound =
+        piecewise.bind(arena, vocab, none, lpl::infer::PreTokenizer::IndividualDigitsThenByteLevel);
+    const lpl::core::u32 pieceCount = piecewise.encode(hundred, 3u, pieceIds, 4u, pieceSkipped);
+
     test.check(claimedNothing, "binding no merge claims nothing");
     test.check(same, "and encodes the parity prompt as the vocabulary alone does");
+    test.check(doubleZero != lpl::infer::kNoToken && wholeCount == 2u && wholeIds[0] == one &&
+                   wholeIds[1] == doubleZero,
+               "over the whole text, 100 is 1 then the parity vocabulary's 00");
+    test.check(piecewiseBound && pieceCount == 3u && pieceIds[0] == one && pieceIds[1] == zero && pieceIds[2] == zero,
+               "bound with SmolLM2's pre-tokenizer and no merge, each digit is a piece of its own: 1, 0, 0");
     test.measure("tokens", boundCount);
+}
+
+/**
+ * @brief A contraction the end of the text cuts is none: x' then the end, and x'r then the end, split into one
+ *        character each, as Hugging Face splits "x'" and "x'r", though the bytes after the end would spell 're.
+ */
+LPL_TEST(a_contraction_cut_by_the_end_of_the_text_is_no_contraction)
+{
+    const char text[] = "x're";
+    lpl::core::u32 agreeing = 0u;
+    const lpl::core::u32 lengths[] = {2u, 3u};
+
+    for (const lpl::core::u32 bytes : lengths)
+    {
+        lpl::core::u32 pieces = 0u;
+        bool single = true;
+        for (lpl::core::u32 at = 0u; at < bytes && pieces <= bytes; ++pieces)
+        {
+            const lpl::core::u32 piece = lpl::infer::preTokenizedPieceBytes(
+                lpl::infer::PreTokenizer::IndividualDigitsThenByteLevel, text, bytes, at);
+            single = single && piece == 1u;
+            at += piece != 0u ? piece : bytes;
+        }
+        agreeing += single && pieces == bytes ? 1u : 0u;
+    }
+
+    test.check(agreeing == 2u, "each character is a piece of its own, none read past the end");
+}
+
+/**
+ * @brief Pairs chosen so that the index's hash puts them in a stair, one more slot each, fill a run of slots one per
+ *        pair: kBytePairMostProbes of them are indexed, one more is refused as crowded, so that no lookup ever probes
+ *        a run made longer by a list made to collide.
+ *
+ * @details The pairs are found with the encoder's hash worked again here: if the hash changes, the stair no longer
+ *          forms, and this test says so.
+ */
+LPL_TEST(merges_made_to_collide_are_refused_rather_than_probed)
+{
+    lpl::infer::TensorArena arena{kTokenizerArenaBytes};
+    const bool stairIndexed =
+        indexStair(arena, lpl::infer::kBytePairMostProbes) == lpl::infer::BytePairMergesVerdict::Indexed;
+    const bool longerRefused =
+        indexStair(arena, lpl::infer::kBytePairMostProbes + 1u) == lpl::infer::BytePairMergesVerdict::Crowded;
+
+    test.check(stairIndexed, "a run of kBytePairMostProbes slots is indexed");
+    test.check(longerRefused, "one slot more, and the merges are refused as crowded");
 }
