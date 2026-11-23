@@ -27,7 +27,7 @@ math::Fixed32 sigmoidLinearUnit(math::Fixed32 value) noexcept
 void feedForwardBlock(const ModelConfig &shape, const LayerWeights &weights, VectorView residual, VectorView normed,
                       VectorView gate, VectorView up, QuantBlock *blocks) noexcept
 {
-    rmsNorm(residual, weights.feedForwardNorm, normed);
+    rmsNorm(residual, weights.feedForwardNorm, shape.normEpsilon, normed);
     quantiseRow(normed.values, normed.count, blocks);
     quantisedMatVecPrepared(weights.gate, blocks, gate);
     quantisedMatVecPrepared(weights.up, blocks, up);

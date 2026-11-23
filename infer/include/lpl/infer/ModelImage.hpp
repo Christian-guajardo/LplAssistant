@@ -14,8 +14,8 @@
  *
  * All words are little-endian. The header: magic, version, header bytes, alignment as a power of two, flags,
  * segment count, the image's bytes on 64 bits, the shape (dim, layers, heads, feed-forward width, context,
- * vocabulary size), the vocabulary's text bytes, a reserved word. A segment: role, residency, layer and expert
- * one-based (0 for none), offset and length on 64 bits, FNV-1a signature, a reserved word.
+ * vocabulary size), the vocabulary's text bytes, the norm's epsilon in units of 2^-32. A segment: role, residency,
+ * layer and expert one-based (0 for none), offset and length on 64 bits, FNV-1a signature, a reserved word.
  *
  * @author MasterLaplace
  * @version 0.1.0
@@ -117,7 +117,7 @@ enum class ModelImageVerdict : core::u32 {
     TooShort = 1u,            ///< Shorter than a header, or than the header and its table.
     BadMagic = 2u,            ///< The first word is not "LPLM".
     UnknownVersion = 3u,      ///< A version word other than @ref kModelImageVersion.
-    BadHeader = 4u,           ///< The header's bytes, flags or reserved word are not those written.
+    BadHeader = 4u,           ///< The header's bytes or flags are not those written.
     BadAlignment = 5u,        ///< An alignment below 2^12 or above 2^22.
     BadShape = 6u,            ///< An extent at 0, heads that do not divide the width, or no vocabulary text.
     BadImageBytes = 7u,       ///< The bytes the header gives are not the image's.
