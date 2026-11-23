@@ -449,6 +449,12 @@ LPL_TEST(a_merge_list_that_does_not_hold_is_refused_by_name)
     const lpl::infer::BytePairMerge swapped[] = {
         {kB, kA, kAB}
     };
+    const lpl::infer::BytePairMerge otherLeft[] = {
+        {kC, kB, kAB}
+    };
+    const lpl::infer::BytePairMerge otherRight[] = {
+        {kA, kC, kAB}
+    };
     bool emptyValid = false;
     bool emptyUnknown = false;
     bool emptyConcatenation = false;
@@ -469,6 +475,12 @@ LPL_TEST(a_merge_list_that_does_not_hold_is_refused_by_name)
                        lpl::infer::BytePairMergesVerdict::NotTheConcatenation &&
                    emptyConcatenation,
                "and so is a result of the right length whose bytes are the pair's the other way round");
+    test.check(indexMadeUp(otherLeft, 1u, 1024u, emptyConcatenation) ==
+                       lpl::infer::BytePairMergesVerdict::NotTheConcatenation &&
+                   indexMadeUp(otherRight, 1u, 1024u, emptyConcatenation) ==
+                       lpl::infer::BytePairMergesVerdict::NotTheConcatenation &&
+                   emptyConcatenation,
+               "or whose bytes differ from the left token's alone, or from the right token's alone");
     test.check(indexMadeUp(repeated, 2u, 1024u, emptyRepeated) == lpl::infer::BytePairMergesVerdict::RepeatedPair &&
                    emptyRepeated,
                "a pair merged twice is refused by name, the table empty");
