@@ -25,9 +25,18 @@ constexpr lpl::core::u32 kMadeUpSeed = 0x0105B9E5u;
 constexpr lpl::core::u32 kLinearCongruentialMultiplier = 1664525u;
 constexpr lpl::core::u32 kLinearCongruentialIncrement = 1013904223u;
 constexpr lpl::core::u32 kDrawShift = 24u;
+constexpr lpl::core::u32 kHalfShift = 16u;
 constexpr lpl::core::u32 kPreTokenizerWordIndex = 68u; ///< Byte of the header's pre-tokenizer word.
 constexpr lpl::core::u32 kMergeEntryBytes = 12u;
 constexpr lpl::core::u32 kSegmentSignatureAt = 32u; ///< Byte of a table entry's signature.
+constexpr lpl::core::u32 kMadeUpAlphabet = 6u;      ///< Single-byte tokens of the made-up merges: a to f.
+constexpr lpl::core::u32 kMadeUpMergeCount = 120u;
+constexpr lpl::core::u32 kMadeUpTokenCap = kMadeUpAlphabet + kMadeUpMergeCount;
+constexpr lpl::core::u32 kMadeUpTokenMostBytes = 12u;
+constexpr lpl::core::u32 kMadeUpMergeAttempts = 20000u;
+constexpr lpl::core::u32 kMadeUpWords = 200u;
+constexpr lpl::core::u32 kMadeUpWordMostBytes = 48u;
+constexpr lpl::core::usize kMadeUpArenaBytes = 256u * 1024u;
 
 /** The made-up vocabulary of the refusals: a, b, ab, c and abc. */
 constexpr char kMadeUpText[] = "ababcabc";
@@ -234,6 +243,130 @@ void putWordAt(lpl::core::u8 *bytes, lpl::core::u64 offset, lpl::core::u32 value
     if (verdict != lpl::infer::BytePairMergesVerdict::Indexed)
         emptyWhenRefused = emptyWhenRefused && table.size() == 0u && table.rank(kA, kB) == lpl::infer::kNoMerge;
     return verdict;
+}
+
+/**
+ * @struct MadeUpMerges
+ * @brief Merges the test made up over the letters a to f, each joining two tokens it made before into a new one, and a
+ *        table of every pair's rank worked apart from the index under test.
+ */
+struct MadeUpMerges {
+    char *text{nullptr};                        ///< The tokens' bytes, one after the other.
+    lpl::infer::VocabEntry *entries{nullptr};   ///< Where each token's bytes lie.
+    lpl::infer::BytePairMerge *merges{nullptr}; ///< The merges, in the order the test made them: their ranks.
+    lpl::core::u32 *rankOf{nullptr};            ///< kMadeUpTokenCap squared: the rank of each pair, or kNoMerge.
+    lpl::core::u32 tokens{0u};                  ///< Tokens made.
+    lpl::core::u32 mergeCount{0u};              ///< Merges made.
+    lpl::core::u32 textBytes{0u};               ///< Bytes of text.
+};
+
+/**
+ * @brief The next draw of a linear congruential generator, its high half.
+ */
+[[nodiscard]] lpl::core::u32 nextDraw(lpl::core::u32 &state)
+{
+    state = state * kLinearCongruentialMultiplier + kLinearCongruentialIncrement;
+    return state >> kHalfShift;
+}
+
+/**
+ * @brief Whether a token of @p table already spells the @p length bytes at @p bytes.
+ */
+[[nodiscard]] bool spelt(const MadeUpMerges &table, const char *bytes, lpl::core::u32 length)
+{
+    for (lpl::core::u32 token = 0u; token < table.tokens; ++token)
+    {
+        bool same = table.entries[token].length == length;
+        for (lpl::core::u32 i = 0u; same && i < length; ++i)
+            same = table.text[table.entries[token].offset + i] == bytes[i];
+        if (same)
+            return true;
+    }
+    return false;
+}
+
+/**
+ * @brief Makes up to kMadeUpMergeCount merges in @p arena: the six letters, then pairs of tokens drawn at random whose
+ *        bytes no token spells yet, at most kMadeUpTokenMostBytes long.
+ * @return Whether the arena held them.
+ */
+[[nodiscard]] bool makeUpMerges(lpl::infer::TensorArena &arena, MadeUpMerges &table)
+{
+    table.text = arena.claim<char>(kMadeUpTokenCap * kMadeUpTokenMostBytes);
+    table.entries = arena.claim<lpl::infer::VocabEntry>(kMadeUpTokenCap);
+    table.merges = arena.claim<lpl::infer::BytePairMerge>(kMadeUpMergeCount);
+    table.rankOf = arena.claim<lpl::core::u32>(kMadeUpTokenCap * kMadeUpTokenCap);
+    if (table.text == nullptr || table.entries == nullptr || table.merges == nullptr || table.rankOf == nullptr)
+        return false;
+
+    for (lpl::core::u32 pair = 0u; pair < kMadeUpTokenCap * kMadeUpTokenCap; ++pair)
+        table.rankOf[pair] = lpl::infer::kNoMerge;
+    for (; table.tokens < kMadeUpAlphabet; ++table.tokens)
+    {
+        table.text[table.tokens] = static_cast<char>('a' + table.tokens);
+        table.entries[table.tokens] = lpl::infer::VocabEntry{table.tokens, 1u};
+    }
+    table.textBytes = kMadeUpAlphabet;
+
+    lpl::core::u32 state = kMadeUpSeed;
+    for (lpl::core::u32 attempt = 0u; attempt < kMadeUpMergeAttempts && table.mergeCount < kMadeUpMergeCount; ++attempt)
+    {
+        const lpl::core::u32 left = nextDraw(state) % table.tokens;
+        const lpl::core::u32 right = nextDraw(state) % table.tokens;
+        const lpl::infer::VocabEntry leftEntry = table.entries[left];
+        const lpl::infer::VocabEntry rightEntry = table.entries[right];
+        const lpl::core::u32 length = leftEntry.length + rightEntry.length;
+        if (length > kMadeUpTokenMostBytes || table.rankOf[left * kMadeUpTokenCap + right] != lpl::infer::kNoMerge)
+            continue;
+
+        char *const bytes = table.text + table.textBytes;
+        for (lpl::core::u32 i = 0u; i < leftEntry.length; ++i)
+            bytes[i] = table.text[leftEntry.offset + i];
+        for (lpl::core::u32 i = 0u; i < rightEntry.length; ++i)
+            bytes[leftEntry.length + i] = table.text[rightEntry.offset + i];
+        if (spelt(table, bytes, length))
+            continue;
+
+        table.entries[table.tokens] = lpl::infer::VocabEntry{table.textBytes, length};
+        table.merges[table.mergeCount] = lpl::infer::BytePairMerge{left, right, table.tokens};
+        table.rankOf[left * kMadeUpTokenCap + right] = table.mergeCount;
+        table.textBytes += length;
+        ++table.tokens;
+        ++table.mergeCount;
+    }
+    return true;
+}
+
+/**
+ * @brief Merges @p count symbols the plain way, worked apart from the encoder: over and over, the adjacent pair of the
+ *        lowest rank, the leftmost among equals, until no adjacent pair is a merge.
+ * @return Merges applied; @p count receives the symbols left.
+ */
+lpl::core::u32 mergeLowestRankFirst(const MadeUpMerges &table, lpl::core::u32 *symbols, lpl::core::u32 &count)
+{
+    lpl::core::u32 applied = 0u;
+    for (;;)
+    {
+        lpl::core::u32 lowest = lpl::infer::kNoMerge;
+        lpl::core::u32 at = 0u;
+        for (lpl::core::u32 i = 0u; i + 1u < count; ++i)
+        {
+            const lpl::core::u32 rank = table.rankOf[symbols[i] * kMadeUpTokenCap + symbols[i + 1u]];
+            if (rank < lowest)
+            {
+                lowest = rank;
+                at = i;
+            }
+        }
+        if (lowest == lpl::infer::kNoMerge)
+            return applied;
+
+        symbols[at] = table.merges[lowest].result;
+        for (lpl::core::u32 i = at + 1u; i + 1u < count; ++i)
+            symbols[i] = symbols[i + 1u];
+        --count;
+        ++applied;
+    }
 }
 
 /**
@@ -739,6 +872,61 @@ LPL_TEST(encoding_then_decoding_gives_back_every_byte_that_has_a_token)
     test.check(countingSkipped == kMadeUpTexts, "and the others are counted as skipped");
     test.check(truncating == kMadeUpTexts, "encoding into three slots writes the first three tokens");
     test.measure("skipped", skippedOverall);
+    test.measureHexadecimal("id_signature", signature);
+}
+
+/**
+ * @brief On words drawn from six letters, merged by a hundred and twenty made-up merges, the encoder writes the tokens
+ *        the plain way of merging gives, worked apart: lowest rank first, leftmost first among equals.
+ */
+LPL_TEST(the_merging_agrees_with_lowest_rank_first_on_made_up_merges)
+{
+    lpl::infer::TensorArena arena{kMadeUpArenaBytes};
+    MadeUpMerges table{};
+    lpl::infer::Vocab vocab;
+    lpl::infer::BytePairMerges merges;
+    lpl::infer::Tokenizer tokenizer;
+    char *const word = arena.claim<char>(kMadeUpWordMostBytes);
+    lpl::core::u32 *const expected = arena.claim<lpl::core::u32>(kMadeUpWordMostBytes);
+    lpl::core::u32 *const ids = arena.claim<lpl::core::u32>(kMadeUpWordMostBytes);
+
+    const bool made =
+        word != nullptr && expected != nullptr && ids != nullptr && makeUpMerges(arena, table) &&
+        vocab.borrow(arena, table.text, table.textBytes, table.entries, table.tokens) &&
+        merges.borrow(arena, table.merges, table.mergeCount, vocab) == lpl::infer::BytePairMergesVerdict::Indexed &&
+        tokenizer.bind(arena, vocab, merges, lpl::infer::PreTokenizer::WholeText);
+    if (!test.check(made && table.mergeCount == kMadeUpMergeCount, "a hundred and twenty merges are made and bound"))
+        return;
+
+    lpl::core::u32 state = kMadeUpSeed ^ kFnv1aPrime;
+    lpl::core::u32 agreeing = 0u;
+    lpl::core::u32 applied = 0u;
+    lpl::core::u32 signature = kFnv1aOffsetBasis;
+    for (lpl::core::u32 index = 0u; index < kMadeUpWords; ++index)
+    {
+        lpl::core::u32 count = 1u + nextDraw(state) % kMadeUpWordMostBytes;
+        for (lpl::core::u32 i = 0u; i < count; ++i)
+        {
+            const lpl::core::u32 letter = nextDraw(state) % kMadeUpAlphabet;
+            word[i] = static_cast<char>('a' + letter);
+            expected[i] = letter;
+        }
+
+        lpl::core::u32 skipped = 0u;
+        const lpl::core::u32 written = tokenizer.encode(word, count, ids, kMadeUpWordMostBytes, skipped);
+        applied += mergeLowestRankFirst(table, expected, count);
+        bool same = written == count && skipped == 0u;
+        for (lpl::core::u32 i = 0u; same && i < count; ++i)
+            same = ids[i] == expected[i];
+        for (lpl::core::u32 i = 0u; i < written; ++i)
+            foldWord(signature, ids[i]);
+        agreeing += same ? 1u : 0u;
+    }
+
+    test.check(applied > kMadeUpWords, "the words merge, more than once each on average");
+    test.check(agreeing == kMadeUpWords, "and every word's tokens are those of the plain merging");
+    test.measure("words", kMadeUpWords);
+    test.measure("merges_applied", applied);
     test.measureHexadecimal("id_signature", signature);
 }
 
