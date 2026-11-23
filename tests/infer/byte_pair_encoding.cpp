@@ -932,6 +932,56 @@ LPL_TEST(the_merging_agrees_with_lowest_rank_first_on_made_up_merges)
 }
 
 /**
+ * @brief Five merges, ab, cb, ac, cc then bb, encode abbaccccb as ab b ac cc cb, worked by hand: ab first, cb at the
+ *        end, ac, then the middle cc, no pair left. Merging ab takes the second b's pair out of the middle of the heap,
+ *        and the pair that replaces it there must climb above its new parent for ac to come before cc.
+ */
+LPL_TEST(the_lowest_rank_still_merges_first_after_a_pair_leaves_the_middle_of_the_heap)
+{
+    constexpr char kText[] = "abcabcbaccccbb";
+    constexpr lpl::infer::VocabEntry kEntries[] = {
+        {0u,  1u},
+        {1u,  1u},
+        {2u,  1u},
+        {3u,  2u},
+        {5u,  2u},
+        {7u,  2u},
+        {9u,  2u},
+        {12u, 2u}
+    };
+    constexpr lpl::infer::BytePairMerge kHandMerges[] = {
+        {0u, 1u, 3u},
+        {2u, 1u, 4u},
+        {0u, 2u, 5u},
+        {2u, 2u, 6u},
+        {1u, 1u, 7u}
+    };
+    constexpr char kWord[] = "abbaccccb";
+    constexpr lpl::core::u32 kExpected[] = {3u, 1u, 5u, 6u, 4u};
+    constexpr lpl::core::u32 kExpectedCount = sizeof(kExpected) / sizeof(kExpected[0]);
+    lpl::infer::TensorArena arena{kTokenizerArenaBytes};
+    lpl::infer::Vocab vocab;
+    lpl::infer::BytePairMerges merges;
+    lpl::infer::Tokenizer tokenizer;
+
+    if (!test.check(vocab.borrow(arena, kText, sizeof(kText) - 1u, kEntries, 8u) &&
+                        merges.borrow(arena, kHandMerges, 5u, vocab) == lpl::infer::BytePairMergesVerdict::Indexed &&
+                        tokenizer.bind(arena, vocab, merges, lpl::infer::PreTokenizer::WholeText),
+                    "the five merges are indexed and bound"))
+        return;
+
+    lpl::core::u32 ids[16];
+    lpl::core::u32 skipped = 0u;
+    const lpl::core::u32 count = tokenizer.encode(kWord, sizeof(kWord) - 1u, ids, 16u, skipped);
+    bool same = count == kExpectedCount && skipped == 0u;
+    for (lpl::core::u32 i = 0u; same && i < count; ++i)
+        same = ids[i] == kExpected[i];
+
+    test.check(same, "abbaccccb encodes as ab b ac cc cb");
+    test.measure("tokens", count);
+}
+
+/**
  * @brief A tokenizer bound to the parity vocabulary with no merge and the whole text as one piece claims nothing and
  *        encodes the parity prompt as the tokenizer of a vocabulary alone does.
  */
