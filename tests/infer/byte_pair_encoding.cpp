@@ -29,14 +29,14 @@ constexpr lpl::core::u32 kHalfShift = 16u;
 constexpr lpl::core::u32 kPreTokenizerWordIndex = 68u; ///< Byte of the header's pre-tokenizer word.
 constexpr lpl::core::u32 kMergeEntryBytes = 12u;
 constexpr lpl::core::u32 kSegmentSignatureAt = 32u; ///< Byte of a table entry's signature.
-constexpr lpl::core::u32 kMadeUpAlphabet = 6u;      ///< Single-byte tokens of the made-up merges: a to f.
-constexpr lpl::core::u32 kMadeUpMergeCount = 120u;
+constexpr lpl::core::u32 kMadeUpAlphabet = 3u;      ///< Single-byte tokens of the made-up merges: a to c.
+constexpr lpl::core::u32 kMadeUpMergeCount = 200u;
 constexpr lpl::core::u32 kMadeUpTokenCap = kMadeUpAlphabet + kMadeUpMergeCount;
 constexpr lpl::core::u32 kMadeUpTokenMostBytes = 12u;
 constexpr lpl::core::u32 kMadeUpMergeAttempts = 20000u;
-constexpr lpl::core::u32 kMadeUpWords = 200u;
-constexpr lpl::core::u32 kMadeUpWordMostBytes = 48u;
-constexpr lpl::core::usize kMadeUpArenaBytes = 256u * 1024u;
+constexpr lpl::core::u32 kMadeUpWords = 1000u;
+constexpr lpl::core::u32 kMadeUpWordMostBytes = 64u;
+constexpr lpl::core::usize kMadeUpArenaBytes = 512u * 1024u;
 
 /** The made-up vocabulary of the refusals: a, b, ab, c and abc. */
 constexpr char kMadeUpText[] = "ababcabc";
@@ -247,7 +247,7 @@ void putWordAt(lpl::core::u8 *bytes, lpl::core::u64 offset, lpl::core::u32 value
 
 /**
  * @struct MadeUpMerges
- * @brief Merges the test made up over the letters a to f, each joining two tokens it made before into a new one, and a
+ * @brief Merges the test made up over the letters a to c, each joining two tokens it made before into a new one, and a
  *        table of every pair's rank worked apart from the index under test.
  */
 struct MadeUpMerges {
@@ -286,8 +286,8 @@ struct MadeUpMerges {
 }
 
 /**
- * @brief Makes up to kMadeUpMergeCount merges in @p arena: the six letters, then pairs of tokens drawn at random whose
- *        bytes no token spells yet, at most kMadeUpTokenMostBytes long.
+ * @brief Makes up to kMadeUpMergeCount merges in @p arena: the three letters, then pairs of tokens drawn at random
+ * whose bytes no token spells yet, at most kMadeUpTokenMostBytes long.
  * @return Whether the arena held them.
  */
 [[nodiscard]] bool makeUpMerges(lpl::infer::TensorArena &arena, MadeUpMerges &table)
@@ -876,8 +876,9 @@ LPL_TEST(encoding_then_decoding_gives_back_every_byte_that_has_a_token)
 }
 
 /**
- * @brief On words drawn from six letters, merged by a hundred and twenty made-up merges, the encoder writes the tokens
- *        the plain way of merging gives, worked apart: lowest rank first, leftmost first among equals.
+ * @brief On a thousand words drawn from three letters, merged by two hundred made-up merges, the encoder writes the
+ *        tokens the plain way of merging gives, worked apart: lowest rank first, leftmost first among equals. Few
+ * letters make long competing runs, which reach the heap's rarer paths, such as a removal whose replacement sifts up.
  */
 LPL_TEST(the_merging_agrees_with_lowest_rank_first_on_made_up_merges)
 {
@@ -895,7 +896,7 @@ LPL_TEST(the_merging_agrees_with_lowest_rank_first_on_made_up_merges)
         vocab.borrow(arena, table.text, table.textBytes, table.entries, table.tokens) &&
         merges.borrow(arena, table.merges, table.mergeCount, vocab) == lpl::infer::BytePairMergesVerdict::Indexed &&
         tokenizer.bind(arena, vocab, merges, lpl::infer::PreTokenizer::WholeText);
-    if (!test.check(made && table.mergeCount == kMadeUpMergeCount, "a hundred and twenty merges are made and bound"))
+    if (!test.check(made && table.mergeCount == kMadeUpMergeCount, "two hundred merges are made and bound"))
         return;
 
     lpl::core::u32 state = kMadeUpSeed ^ kFnv1aPrime;
