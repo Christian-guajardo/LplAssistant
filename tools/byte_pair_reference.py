@@ -73,6 +73,7 @@ PROMPTS = [
     "ASCII art: ╔════╗ and " + "─" * 24,
     "Ελληνικά, русский, עברית, العربية, हिन्दी, ไทย",
     "  leading spaces and trailing  ",
+    "spaces before digits:  1   22\t 3, odd runs: ### ..... !!! ----- aaa zzz",
 ]
 
 

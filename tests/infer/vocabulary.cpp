@@ -469,3 +469,43 @@ LPL_TEST(a_sort_without_room_for_its_waiting_runs_compares_them_and_counts_each)
     test.check(lpl::infer::vocabularySortFallbacks() == countedBefore + crampedFallbacks, "each fallback is counted");
     test.measure("fallbacks_with_room_for_one", crampedFallbacks);
 }
+
+/**
+ * @brief The longest prefix is found up to the vocabulary's longest token, kMaxTokenBytes at most: a text that starts
+ *        with a token of kMaxTokenBytes bytes finds it whole, one byte short of it finds the next longest token, and a
+ *        token past kMaxTokenBytes, which a vocabulary may hold but no model may, is never answered.
+ */
+LPL_TEST(the_longest_prefix_reaches_a_token_of_k_max_token_bytes_and_no_further)
+{
+    constexpr lpl::core::u32 kPastBytes = lpl::infer::kMaxTokenBytes + 2u;
+    char text[kPastBytes + 1u];
+    for (lpl::core::u32 i = 0u; i < lpl::infer::kMaxTokenBytes; ++i)
+        text[i] = kLongHead[i];
+    text[lpl::infer::kMaxTokenBytes] = 'Y';
+    text[lpl::infer::kMaxTokenBytes + 1u] = 'Z';
+    text[kPastBytes] = 'X';
+
+    const lpl::infer::VocabEntry entries[] = {
+        {0u, 1u                        },
+        {0u, 2u                        },
+        {0u, lpl::infer::kMaxTokenBytes},
+        {0u, kPastBytes                }
+    };
+    lpl::infer::TensorArena arena{1024u};
+    lpl::infer::Vocab vocab;
+    if (!test.check(vocab.borrow(arena, text, kPastBytes + 1u, entries, 4u), "the vocabulary borrows its index"))
+        return;
+
+    lpl::core::u32 wholeLength = 0u;
+    lpl::core::u32 shortLength = 0u;
+    lpl::core::u32 pastLength = 0u;
+    const lpl::core::u32 whole = vocab.longestPrefix(text, lpl::infer::kMaxTokenBytes, wholeLength);
+    const lpl::core::u32 shortOfIt = vocab.longestPrefix(text, lpl::infer::kMaxTokenBytes - 1u, shortLength);
+    const lpl::core::u32 past = vocab.longestPrefix(text, kPastBytes + 1u, pastLength);
+
+    test.check(whole == 2u && wholeLength == lpl::infer::kMaxTokenBytes,
+               "a token of kMaxTokenBytes bytes is found whole");
+    test.check(shortOfIt == 1u && shortLength == 2u, "one byte short of it, the next longest token is");
+    test.check(past == 2u && pastLength == lpl::infer::kMaxTokenBytes,
+               "and before a token past kMaxTokenBytes, the longest of at most kMaxTokenBytes is");
+}

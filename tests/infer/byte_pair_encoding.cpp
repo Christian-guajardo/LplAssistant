@@ -236,6 +236,41 @@ void putWordAt(lpl::core::u8 *bytes, lpl::core::u64 offset, lpl::core::u32 value
     return verdict;
 }
 
+/**
+ * @struct InvalidCase
+ * @brief A sequence of UTF-8 put between "ab" and "cd", and the pieces the five or more bytes make.
+ */
+struct InvalidCase {
+    lpl::core::u8 bytes[4]; ///< The sequence.
+    lpl::core::u32 length;  ///< Its bytes.
+    lpl::core::u32 pieces;  ///< 3 when it breaks the letters around it, 1 when it is a letter.
+};
+
+/**
+ * @brief Whether SmolLM2's pre-tokenizer splits "ab", then @p sample, then "cd" as @p sample says.
+ */
+[[nodiscard]] bool splitsAsExpected(const InvalidCase &sample)
+{
+    char text[8] = {'a', 'b'};
+    for (lpl::core::u32 i = 0u; i < sample.length; ++i)
+        text[2u + i] = static_cast<char>(sample.bytes[i]);
+    text[2u + sample.length] = 'c';
+    text[3u + sample.length] = 'd';
+    const lpl::core::u32 bytes = 4u + sample.length;
+
+    lpl::core::u32 pieces[4] = {0u, 0u, 0u, 0u};
+    lpl::core::u32 count = 0u;
+    for (lpl::core::u32 at = 0u; at < bytes && count < 4u; ++count)
+    {
+        pieces[count] = lpl::infer::preTokenizedPieceBytes(lpl::infer::PreTokenizer::IndividualDigitsThenByteLevel,
+                                                           text, bytes, at);
+        at += pieces[count] != 0u ? pieces[count] : bytes;
+    }
+    if (sample.pieces == 1u)
+        return count == 1u && pieces[0] == bytes;
+    return count == 3u && pieces[0] == 2u && pieces[1] == sample.length && pieces[2] == 2u;
+}
+
 } // namespace
 
 /**
@@ -411,6 +446,9 @@ LPL_TEST(a_merge_list_that_does_not_hold_is_refused_by_name)
         {kA, kB, kAB},
         {kA, kB, kAB}
     };
+    const lpl::infer::BytePairMerge swapped[] = {
+        {kB, kA, kAB}
+    };
     bool emptyValid = false;
     bool emptyUnknown = false;
     bool emptyConcatenation = false;
@@ -427,6 +465,10 @@ LPL_TEST(a_merge_list_that_does_not_hold_is_refused_by_name)
                        lpl::infer::BytePairMergesVerdict::NotTheConcatenation &&
                    emptyConcatenation,
                "a result that is not its pair's bytes is refused by name, the table empty");
+    test.check(indexMadeUp(swapped, 1u, 1024u, emptyConcatenation) ==
+                       lpl::infer::BytePairMergesVerdict::NotTheConcatenation &&
+                   emptyConcatenation,
+               "and so is a result of the right length whose bytes are the pair's the other way round");
     test.check(indexMadeUp(repeated, 2u, 1024u, emptyRepeated) == lpl::infer::BytePairMergesVerdict::RepeatedPair &&
                    emptyRepeated,
                "a pair merged twice is refused by name, the table empty");
@@ -435,6 +477,46 @@ LPL_TEST(a_merge_list_that_does_not_hold_is_refused_by_name)
                "an arena too small for the index is refused by name, the table empty");
     test.check(indexMadeUp(nullptr, 0u, 8u, emptyNone) == lpl::infer::BytePairMergesVerdict::Indexed && emptyNone,
                "no merge is indexed, claiming nothing");
+
+    lpl::infer::TensorArena arena{2048u};
+    lpl::infer::Vocab vocab;
+    lpl::infer::BytePairMerges table;
+    const bool indexed = vocab.borrow(arena, kMadeUpText, sizeof(kMadeUpText) - 1u, kMadeUpEntries, kMadeUpTokens) &&
+                         table.borrow(arena, valid, 2u, vocab) == lpl::infer::BytePairMergesVerdict::Indexed &&
+                         table.rank(kA, kB) == 0u;
+    const bool refusedAfter =
+        table.borrow(arena, repeated, 2u, vocab) == lpl::infer::BytePairMergesVerdict::RepeatedPair;
+    test.check(indexed && refusedAfter && table.size() == 0u && table.rank(kA, kB) == lpl::infer::kNoMerge,
+               "a table indexed then refused holds no merge, not the ones it held");
+}
+
+/**
+ * @brief A byte that starts no valid sequence of UTF-8 is a character of class other, so it breaks a run of letters,
+ *        whether it leads an overlong form, a surrogate, a code point past U+10FFFF or a sequence cut short, or is a
+ *        lone continuation or a byte UTF-8 never uses; a letter of two bytes keeps the run whole.
+ */
+LPL_TEST(an_invalid_byte_of_utf_8_breaks_a_run_of_letters)
+{
+    const InvalidCase cases[] = {
+        {{0xE0u, 0x81u, 0x81u, 0u},    3u, 3u},
+        {{0xF0u, 0x80u, 0x81u, 0x81u}, 4u, 3u},
+        {{0xC1u, 0x81u, 0u, 0u},       2u, 3u},
+        {{0xEDu, 0xA0u, 0x80u, 0u},    3u, 3u},
+        {{0xF4u, 0x90u, 0x80u, 0x80u}, 4u, 3u},
+        {{0xC3u, 0u, 0u, 0u},          1u, 3u},
+        {{0xE2u, 0x82u, 0u, 0u},       2u, 3u},
+        {{0x80u, 0u, 0u, 0u},          1u, 3u},
+        {{0xFFu, 0u, 0u, 0u},          1u, 3u},
+        {{0xC3u, 0xA9u, 0u, 0u},       2u, 1u},
+    };
+    const lpl::core::u32 caseCount = sizeof(cases) / sizeof(cases[0]);
+    lpl::core::u32 agreeing = 0u;
+
+    for (lpl::core::u32 index = 0u; index < caseCount; ++index)
+        agreeing += splitsAsExpected(cases[index]) ? 1u : 0u;
+
+    test.check(agreeing == caseCount, "each invalid sequence breaks the letters around it, and the letter does not");
+    test.measure("cases", caseCount);
 }
 
 /**
