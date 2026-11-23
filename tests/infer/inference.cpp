@@ -12,6 +12,31 @@ namespace {
 constexpr lpl::core::u32 kFnv1aOffsetBasis = 0x811C9DC5u;
 constexpr lpl::core::u32 kWideNormValues = 64u;
 constexpr lpl::core::u32 kEpsilonOneInHundredThousand = 42950u; ///< 1e-5 in units of 2^-32, rounded.
+constexpr lpl::core::u32 kQuarterTurn = 0x40000000u;            ///< A quarter turn, in units of 2^-32 turn.
+constexpr lpl::core::u32 kEighthTurn = 0x20000000u;             ///< An eighth of a turn, in units of 2^-32 turn.
+constexpr lpl::core::u32 kGoldenTurn = 0x9E3779B9u;    ///< 2^32 / phi, rounded: a turn no power of two divides.
+constexpr lpl::core::u32 kOneRadianTurn = 683565276u;  ///< One radian, 2^32 / (2 pi) rounded, the seed's pair 0.
+constexpr lpl::core::u32 kHalfRadianTurn = 341782638u; ///< Half a radian, 2^31 / (2 pi) rounded, the seed's pair 1.
+constexpr lpl::core::u32 kPositionPastTheOldOverflow = 1u << 20; ///< Past 32768, where the angle in Q16.16 overflowed.
+constexpr lpl::core::u32 kRotaryRoom = 8u;                       ///< Values the rotation tests turn at most.
+constexpr lpl::core::i64 kCordicRawUnits = 16;    ///< CORDIC's error against an expected value rounded to a unit.
+constexpr lpl::core::u32 kParityPairs = 6u;       ///< The parity model's heads of 12 channels hold 6 pairs.
+constexpr lpl::core::u32 kWideHeadPairs = 36u;    ///< A head of 72 channels holds 36 pairs.
+constexpr lpl::core::u32 kWideHeadChannels = 72u; ///< One head that wide.
+
+/**
+ * @brief round(2^(32 - i) / (2 pi)) for the parity model's six pairs, computed apart from the code in 80-digit
+ *        arithmetic: one radian per position halved per pair, in units of 2^-32 turn.
+ */
+constexpr lpl::core::u32 kParityTurns[kParityPairs] = {683565276u, 341782638u, 170891319u,
+                                                       85445659u,  42722830u,  21361415u};
+
+/**
+ * @brief round(2^(32 - i) / (2 pi)) for pairs 28 to 35, computed apart from the code: 2.546, 1.273, 0.637, 0.318, then
+ *        halved each pair.
+ */
+constexpr lpl::core::u32 kWideHeadTailTurns[8] = {3u, 1u, 1u, 0u, 0u, 0u, 0u, 0u};
+constexpr lpl::core::u32 kWideHeadTailFirstPair = 28u; ///< The pair kWideHeadTailTurns starts at.
 
 [[nodiscard]] lpl::core::u32 textLength(const char *text)
 {
@@ -73,6 +98,51 @@ void normaliseRaw(const lpl::core::i32 *raws, lpl::core::u32 count, lpl::core::u
 
     shape.vocabSize = vocab.size();
     return model.synthesise(arena, shape, vocab, seed);
+}
+
+/**
+ * @brief Builds the canonical vocabulary and a one-layer model of one head of kWideHeadChannels, in @p arena.
+ *
+ * @return Whether the model was built.
+ */
+[[nodiscard]] bool synthesiseWideHeadModel(lpl::infer::TensorArena &arena, lpl::infer::Vocab &vocab,
+                                           lpl::infer::Model &model)
+{
+    if (!lpl::infer::buildParityVocab(arena, vocab))
+        return false;
+
+    lpl::infer::ModelConfig shape = lpl::infer::parityModelConfig();
+
+    shape.vocabSize = vocab.size();
+    shape.dim = kWideHeadChannels;
+    shape.heads = 1u;
+    shape.layers = 1u;
+    return model.synthesise(arena, shape, vocab, lpl::infer::parityModelSeed());
+}
+
+/**
+ * @brief Turns @p heads heads of @p pairs pairs, each pair (1, 0), by @p turns at @p position, into @p out: pair i of
+ *        each head becomes the cosine and the sine of its angle.
+ */
+void turnUnitPairs(const lpl::core::u32 *turns, lpl::core::u32 pairs, lpl::core::u32 heads, lpl::core::u32 position,
+                   lpl::math::Fixed32 *out)
+{
+    const lpl::core::u32 count = heads * pairs * 2u;
+
+    for (lpl::core::u32 index = 0u; index < count; ++index)
+        out[index] = index % 2u == 0u ? lpl::math::Fixed32::one() : lpl::math::Fixed32::zero();
+    lpl::infer::applyRotaryEmbedding(lpl::infer::VectorView{out, count}, heads, pairs * 2u,
+                                     lpl::infer::RotaryFrequencies{turns, pairs}, position);
+}
+
+/**
+ * @brief Whether the @p pair -th pair of @p values lies within CORDIC's error of raw @p cosineRaw and @p sineRaw.
+ */
+[[nodiscard]] bool pairTurnedTo(const lpl::math::Fixed32 *values, lpl::core::u32 pair, lpl::core::i64 cosineRaw,
+                                lpl::core::i64 sineRaw)
+{
+    return withinRawUnits(values[2u * pair], cosineRaw, kCordicRawUnits) &&
+           withinRawUnits(values[2u * pair + 1u], sineRaw, kCordicRawUnits);
 }
 
 } // namespace
@@ -250,15 +320,117 @@ LPL_TEST(a_shared_rotation_keeps_the_dot_product)
                                     lpl::math::Fixed32::half(), lpl::math::Fixed32::half(),
                                     lpl::math::Fixed32::fromRaw(-lpl::math::Fixed32::kOne / 5)};
     const lpl::math::Fixed32 before = dotProduct(first, second, 4u);
+    const lpl::core::u32 turns[2] = {kOneRadianTurn, kHalfRadianTurn};
+    const lpl::infer::RotaryFrequencies table{turns, 2u};
 
-    lpl::infer::applyRotaryEmbedding(lpl::infer::VectorView{first, 4u}, 1u, 4u, 5u);
-    lpl::infer::applyRotaryEmbedding(lpl::infer::VectorView{second, 4u}, 1u, 4u, 5u);
+    lpl::infer::applyRotaryEmbedding(lpl::infer::VectorView{first, 4u}, 1u, 4u, table, 5u);
+    lpl::infer::applyRotaryEmbedding(lpl::infer::VectorView{second, 4u}, 1u, 4u, table, 5u);
 
     const lpl::math::Fixed32 after = dotProduct(first, second, 4u);
 
     test.check((before - after).abs() < lpl::math::Fixed32::fromRaw(lpl::math::Fixed32::kOne / 64),
                "rotating both vectors by the same position leaves their dot product alone");
     test.measureHexadecimal("dot_product_after", static_cast<lpl::core::u32>(after.raw()));
+}
+
+/**
+ * @brief Each pair turns by its own entry of the model's table, in every head: at position 1, a quarter turn takes
+ *        (1, 0) to (0, 1), and an eighth to (0.70711, 0.70711).
+ *
+ * @details Expected values in double precision, apart from the code: 65536 times the cosine and the sine of 2 pi / 4,
+ *          0 and 65536, and of 2 pi / 8, 46340.95 twice. Within kCordicRawUnits: over every raw angle, at both ends of
+ *          the turns that floor to it, CORDIC's sixteen steps and the angle floored to a raw unit err by at most 16.37
+ *          raw units against the exact value in double precision, and by at most 16 against it rounded to a unit; by 4
+ *          here.
+ */
+LPL_TEST(each_pair_turns_by_its_own_frequency_in_every_head)
+{
+    const lpl::core::u32 turns[2] = {kQuarterTurn, kEighthTurn};
+    lpl::math::Fixed32 values[kRotaryRoom] = {};
+
+    turnUnitPairs(turns, 2u, 2u, 1u, values);
+    test.check(pairTurnedTo(values, 0u, 0, 65536) && pairTurnedTo(values, 2u, 0, 65536),
+               "a quarter turn takes (1, 0) to (0, 1), in each head");
+    test.check(pairTurnedTo(values, 1u, 46341, 46341) && pairTurnedTo(values, 3u, 46341, 46341),
+               "an eighth takes it to (0.70711, 0.70711), in each head");
+    test.measure("quarter_turn_cosine_raw", values[0].raw());
+    test.measure("eighth_turn_sine_raw", values[3].raw());
+}
+
+/**
+ * @brief At position 2^20, past the 32768 where an angle in Q16.16 radians overflowed, each pair turns by its frequency
+ *        times the position, modulo a turn, exactly.
+ *
+ * @details The angle in turns is (2^20 f mod 2^32) / 2^32, exact in double precision since 2^20 f stays below 2^53,
+ *          computed apart from the code. For f = 0x9E3779B9 it is 2489 / 4096 = 0.607666015625 of a turn, 3.818078181
+ *          rad, whose cosine and sine are -51103.52 and -41029.23 raw units. For one radian per position rounded, f =
+ *          683565276, it is 220 / 4096 = 0.0537109375 of a turn, 0.337475773 rad: 61839.34 and 21699.38 raw units. That
+ *          angle is 0.00065 rad from 2^20 rad modulo 2 pi, which is the entry's rounding, 0.42 of 2^-32 turn, times the
+ *          position: the arithmetic adds no error to the frequency it is given. Both angles are whole multiples of
+ * 2^-12 turn, so one position further, at 2^20 + 1, 0x9E3779B9 turns by 0x39C779B9 units, whose low 20 bits
+ * count: 1.418114951 rad, whose cosine and sine are 9967.30 and 64773.61 raw units, where 0x39C00000 alone would give
+ * 10013.72.
+ */
+LPL_TEST(a_position_past_32768_turns_by_its_frequency_times_the_position_modulo_a_turn)
+{
+    const lpl::core::u32 turns[2] = {kGoldenTurn, kOneRadianTurn};
+    lpl::math::Fixed32 values[kRotaryRoom] = {};
+    lpl::math::Fixed32 further[kRotaryRoom] = {};
+
+    turnUnitPairs(turns, 2u, 1u, kPositionPastTheOldOverflow, values);
+    turnUnitPairs(turns, 1u, 1u, kPositionPastTheOldOverflow + 1u, further);
+    test.check(pairTurnedTo(values, 0u, -51104, -41029), "0x9E3779B9 turns (1, 0) to (-0.77978, -0.62606) at 2^20");
+    test.check(pairTurnedTo(values, 1u, 61839, 21699), "one radian per position turns it to (0.94359, 0.33111)");
+    test.check(pairTurnedTo(further, 0u, 9967, 64774),
+               "and 0x9E3779B9 turns it to (0.15209, 0.98837) at 2^20 + 1, to the last bit of the turn");
+    test.measure("golden_cosine_raw", values[0].raw());
+    test.measure("one_radian_sine_raw", values[3].raw());
+}
+
+/**
+ * @brief The model a seed derives turns pair i by 2^-i radians per position, its table rounded to 2^-32 turn.
+ *
+ * @details kParityTurns, round(2^(32 - i) / (2 pi)), computed apart from the code.
+ */
+LPL_TEST(the_seed_s_model_turns_pair_i_by_two_to_the_minus_i_radians)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+
+    test.check(synthesiseCanonicalModel(arena, vocab, model, lpl::infer::parityModelSeed()),
+               "the canonical model builds");
+
+    const lpl::infer::RotaryFrequencies table = model.rotaryFrequencies();
+    bool every = table.pairs == kParityPairs && table.turnsPerPosition != nullptr;
+
+    for (lpl::core::u32 pair = 0u; every && pair < kParityPairs; ++pair)
+        every = table.turnsPerPosition[pair] == kParityTurns[pair];
+    test.check(table.pairs == kParityPairs, "one entry per pair of a head of 12 channels");
+    test.check(every, "pair i turns by round(2^(32 - i) / (2 pi)) units of 2^-32 turn per position");
+}
+
+/**
+ * @brief In a head of 72 channels, the seed's pairs 28 to 30 turn by 3, 1 and 1 units of 2^-32 turn per position, and
+ *        every pair after them by none: what 2^(32 - i) / (2 pi) rounds to, not what a shift by 64 bits or more leaves.
+ *
+ * @details kWideHeadTailTurns, computed apart from the code.
+ */
+LPL_TEST(the_seed_s_pairs_past_the_thirtieth_turn_by_none)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+
+    test.check(synthesiseWideHeadModel(arena, vocab, model), "a model of one head of 72 channels builds");
+
+    const lpl::infer::RotaryFrequencies table = model.rotaryFrequencies();
+    bool every = table.pairs == kWideHeadPairs && table.turnsPerPosition != nullptr;
+
+    for (lpl::core::u32 pair = kWideHeadTailFirstPair; every && pair < kWideHeadPairs; ++pair)
+        every = table.turnsPerPosition[pair] == kWideHeadTailTurns[pair - kWideHeadTailFirstPair];
+    test.check(table.pairs == kWideHeadPairs, "one entry per pair, 36");
+    test.check(every, "3, 1 and 1 for pairs 28 to 30, then 0");
 }
 
 /**

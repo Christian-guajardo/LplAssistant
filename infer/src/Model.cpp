@@ -32,6 +32,8 @@ static_assert(sizeof(math::Fixed32) == 4u && alignof(math::Fixed32) <= kModelVie
               "a Q16.16 value in place is one little-endian word, aligned like a block");
 static_assert(sizeof(VocabEntry) == 8u && alignof(VocabEntry) <= kModelViewAlignment,
               "a token's entry in place is its offset then its length, two words aligned like a block");
+static_assert(sizeof(core::u32) == 4u && alignof(core::u32) <= kModelViewAlignment,
+              "a rotary frequency in place is one little-endian word, aligned like a block");
 
 /**
  * @brief Per-tensor stream salts.
@@ -53,6 +55,12 @@ constexpr core::u32 kSaltFeedForwardNorm = 0x9090u;
 constexpr core::u32 kSaltFinalNorm = 0xA0A0u;
 
 constexpr core::u32 kFnv1aPrime = 0x01000193u;
+
+/** 2^64 / (2 pi), floored: one radian in units of 2^-64 turn, from which each of a seed's rotary entries rounds. */
+constexpr core::u64 kTurnsPerRadianQ64 = 2935890503282001226ull;
+
+/** The last pair whose rounding shift stays under 64 bits; 2^-i radians rounds to no turn from pair 31 on anyway. */
+constexpr core::u32 kLastPairShifted = 31u;
 
 /**
  * @brief Folds one word into a running FNV-1a hash.
@@ -157,6 +165,54 @@ bool synthesiseNorm(TensorArena &arena, math::Random &stream, core::u32 count, C
 
     out = ConstVectorView{values, count};
     return true;
+}
+
+/**
+ * @brief round(2^(32 - @p pair) / (2 pi)): 2^-pair radians per position, in units of 2^-32 turn, rounded from
+ *        kTurnsPerRadianQ64, whose 32 extra bits leave the rounding exact for every pair.
+ */
+core::u32 seedTurnsPerPosition(core::u32 pair) noexcept
+{
+    if (pair > kLastPairShifted)
+        return 0u;
+    return static_cast<core::u32>((kTurnsPerRadianQ64 + (core::u64{1} << (31u + pair))) >> (32u + pair));
+}
+
+/**
+ * @brief Claims a rotary table of @p pairs entries; none for no pair, which an arena does not claim.
+ * @return false when the arena is exhausted.
+ */
+bool claimRotary(TensorArena &arena, core::u32 pairs, core::u32 *&out)
+{
+    out = pairs == 0u ? nullptr : arena.claim<core::u32>(pairs);
+    return pairs == 0u || out != nullptr;
+}
+
+/**
+ * @brief Claims the rotary table of a model a seed derives: pair i turns by 2^-i radians per position, rounded.
+ * @return false when the arena is exhausted.
+ */
+bool synthesiseRotary(TensorArena &arena, core::u32 pairs, RotaryFrequencies &out)
+{
+    core::u32 *turns = nullptr;
+    if (!claimRotary(arena, pairs, turns))
+        return false;
+
+    for (core::u32 pair = 0u; pair < pairs; ++pair)
+        turns[pair] = seedTurnsPerPosition(pair);
+    out = RotaryFrequencies{turns, pairs};
+    return true;
+}
+
+/**
+ * @brief Folds a rotary table.
+ * @param hash   Running value.
+ * @param rotary The table.
+ */
+void foldRotary(core::u32 &hash, RotaryFrequencies rotary) noexcept
+{
+    for (core::u32 pair = 0u; pair < rotary.pairs; ++pair)
+        foldWord(hash, rotary.turnsPerPosition[pair]);
 }
 
 /**
@@ -268,6 +324,41 @@ void viewVector(const core::u8 *&cursor, core::u32 count, ConstVectorView &out) 
 {
     out = ConstVectorView{reinterpret_cast<const math::Fixed32 *>(cursor), count};
     cursor += static_cast<core::usize>(count) * sizeof(math::Fixed32);
+}
+
+/**
+ * @brief Writes a rotary table into an image, a little-endian word per pair.
+ * @param cursor Write position.
+ * @param rotary The table.
+ */
+void writeRotary(core::u8 *&cursor, RotaryFrequencies rotary) noexcept
+{
+    for (core::u32 pair = 0u; pair < rotary.pairs; ++pair)
+        putWord(cursor, rotary.turnsPerPosition[pair]);
+}
+
+/**
+ * @brief Reads a rotary table of @p pairs entries out of an image and into the arena.
+ * @return false when the arena is exhausted.
+ */
+bool copyRotary(TensorArena &arena, const core::u8 *&cursor, core::u32 pairs, RotaryFrequencies &out)
+{
+    core::u32 *turns = nullptr;
+    if (!claimRotary(arena, pairs, turns))
+        return false;
+
+    for (core::u32 pair = 0u; pair < pairs; ++pair)
+        turns[pair] = takeWord(cursor);
+    out = RotaryFrequencies{turns, pairs};
+    return true;
+}
+
+/**
+ * @brief Views a rotary table of @p pairs entries where it lies in an image.
+ */
+void viewRotary(const core::u8 *cursor, core::u32 pairs, RotaryFrequencies &out) noexcept
+{
+    out = RotaryFrequencies{reinterpret_cast<const core::u32 *>(cursor), pairs};
 }
 
 /**
@@ -386,6 +477,7 @@ struct ImageWeights {
     Vocab vocab{};                 ///< The token table.
     QuantMatrixView embedding{};   ///< The tied embedding and output matrix.
     ConstVectorView finalNorm{};   ///< The norm before the output head.
+    RotaryFrequencies rotary{};    ///< How far each pair of a head turns per position.
 };
 
 /**
@@ -411,6 +503,9 @@ ModelReadVerdict copySegment(TensorArena &arena, const core::u8 *bytes, const Mo
         return copyVector(arena, cursor, shape.dim, weights.finalNorm) ? ModelReadVerdict::Read :
                                                                          ModelReadVerdict::ArenaExhausted;
     case ModelSegmentRole::FeedForward: return copyExpert(arena, cursor, shape, weights.layers[segment.layer - 1u]);
+    case ModelSegmentRole::Rotary:
+        return copyRotary(arena, cursor, shape.rotaryPairs(), weights.rotary) ? ModelReadVerdict::Read :
+                                                                                ModelReadVerdict::ArenaExhausted;
     }
     return ModelReadVerdict::ImageRefused;
 }
@@ -438,6 +533,9 @@ ModelReadVerdict viewSegment(TensorArena &arena, const core::u8 *bytes, const Mo
     case ModelSegmentRole::FinalNorm: viewVector(cursor, shape.dim, weights.finalNorm); return ModelReadVerdict::Read;
     case ModelSegmentRole::FeedForward:
         viewExpert(cursor, shape, weights.layers[segment.layer - 1u]);
+        return ModelReadVerdict::Read;
+    case ModelSegmentRole::Rotary:
+        viewRotary(cursor, shape.rotaryPairs(), weights.rotary);
         return ModelReadVerdict::Read;
     }
     return ModelReadVerdict::ImageRefused;
@@ -476,6 +574,7 @@ void writeSegment(core::u8 *at, const Model &model, const ModelSegment &segment)
         writeMatrix(cursor, model.layer(segment.layer - 1u).up);
         writeMatrix(cursor, model.layer(segment.layer - 1u).down);
         return;
+    case ModelSegmentRole::Rotary: writeRotary(cursor, model.rotaryFrequencies()); return;
     }
 }
 
@@ -524,7 +623,8 @@ bool Model::synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab
     }
 
     math::Random finalStream = math::deriveStream(seed, kSaltFinalNorm);
-    if (!synthesiseNorm(arena, finalStream, shape.dim, _finalNorm))
+    if (!synthesiseNorm(arena, finalStream, shape.dim, _finalNorm) ||
+        !synthesiseRotary(arena, shape.rotaryPairs(), _rotary))
         return false;
 
     _config = shape;
@@ -562,6 +662,7 @@ ModelReadReport Model::readImage(TensorArena &arena, const core::u8 *bytes, core
     _vocab = weights.vocab;
     _embedding = weights.embedding;
     _finalNorm = weights.finalNorm;
+    _rotary = weights.rotary;
     _layers = weights.layers;
     return ModelReadReport{ModelReadVerdict::Read, ModelImageVerdict::Accepted, 0u};
 }
@@ -696,6 +797,7 @@ core::u32 Model::fold(core::u32 hash) const noexcept
         foldMatrix(hash, _layers[l].down);
     }
     foldVector(hash, _finalNorm);
+    foldRotary(hash, _rotary);
     return hash;
 }
 

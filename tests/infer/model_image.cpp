@@ -13,7 +13,13 @@ constexpr lpl::core::u32 kImageVersion = 1u;
 constexpr lpl::core::u32 kRetiredImageBytes = 256u;
 constexpr lpl::core::u32 kParityVocabulary = 121u;
 constexpr lpl::core::u32 kMadeUpVocabularyText = 300u;
-constexpr lpl::core::u32 kParitySegments = 7u;
+constexpr lpl::core::u32 kParitySegments = 8u;
+constexpr lpl::core::u32 kFinalNormEntry = 5u;          ///< One-based entry of the parity image's final norm.
+constexpr lpl::core::u32 kRotaryEntry = 6u;             ///< One-based entry of its rotary table.
+constexpr lpl::core::u32 kFirstExpertEntry = 7u;        ///< One-based entry of its first expert.
+constexpr lpl::core::u32 kSecondExpertEntry = 8u;       ///< One-based entry of its second expert.
+constexpr lpl::core::u32 kParityPairs = 6u;             ///< Pairs of the parity model's heads of 12 channels.
+constexpr lpl::core::u32 kMadeUpTurnStep = 0x9E3779B9u; ///< Pair i of a made-up table turns by i + 1 times this.
 constexpr lpl::core::u32 kTableRoom = 16u;
 constexpr lpl::core::u32 kEntryRole = 0u;
 constexpr lpl::core::u32 kEntryOffset = 16u;
@@ -260,15 +266,16 @@ void putWordAt(lpl::core::u8 *bytes, lpl::core::u32 offset, lpl::core::u32 value
 } // namespace
 
 /**
- * @brief A dense model's image holds its residents after the table, 64-byte aligned, then one expert per layer on a
- *        4 KiB boundary.
+ * @brief A dense model's image holds its residents after the table, 64-byte aligned, the rotary table last among them,
+ *        then one expert per layer on a 4 KiB boundary.
  *
- * @details Worked by hand for the parity shape (dim 48, 2 layers, feed-forward 96) with 121 tokens and 300 bytes of
- *          text, a quantised block 36 bytes: the table ends at 64 + 7 * 40 = 344; the vocabulary (8 * 121 + 300 =
- *          1268) at 384; the embedding (121 rows of 2 blocks, 8712) at 1664; each attention (2 norms of 48 words and
- *          4 matrices of 48 rows of 2 blocks, 14208) at 10432 and 24640; the final norm (192) at 38848, ending at
- *          39040; each expert (gate and up of 96 rows of 2 blocks, down of 48 rows of 3, 19008) at 40960 and 61440,
- *          the image ending at 80448.
+ * @details Worked by hand for the parity shape (dim 48, 2 layers, 4 heads, feed-forward 96) with 121 tokens and 300
+ *          bytes of text, a quantised block 36 bytes: the table ends at 64 + 8 * 40 = 384; the vocabulary (8 * 121 +
+ *          300 = 1268) at 384; the embedding (121 rows of 2 blocks, 8712) at 1664; each attention (2 norms of 48 words
+ *          and 4 matrices of 48 rows of 2 blocks, 14208) at 10432 and 24640; the final norm (192) at 38848, ending at
+ *          39040; the rotary table (6 pairs of a head of 12 channels, a word each, 24) at 39040, ending at 39064; each
+ *          expert (gate and up of 96 rows of 2 blocks, down of 48 rows of 3, 19008) at 40960 and 61440, the image
+ *          ending at 80448.
  */
 LPL_TEST(a_dense_model_lays_out_its_residents_then_one_expert_per_layer)
 {
@@ -284,17 +291,18 @@ LPL_TEST(a_dense_model_lays_out_its_residents_then_one_expert_per_layer)
                    isSegment(segments[2], lpl::infer::ModelSegmentRole::Attention, resident, 1u, 0u) &&
                    isSegment(segments[3], lpl::infer::ModelSegmentRole::Attention, resident, 2u, 0u) &&
                    isSegment(segments[4], lpl::infer::ModelSegmentRole::FinalNorm, resident, 0u, 0u) &&
-                   isSegment(segments[5], lpl::infer::ModelSegmentRole::FeedForward, shared, 1u, 1u) &&
-                   isSegment(segments[6], lpl::infer::ModelSegmentRole::FeedForward, shared, 2u, 1u),
-               "the residents in order, then each layer's one shared expert");
+                   isSegment(segments[5], lpl::infer::ModelSegmentRole::Rotary, resident, 0u, 0u) &&
+                   isSegment(segments[6], lpl::infer::ModelSegmentRole::FeedForward, shared, 1u, 1u) &&
+                   isSegment(segments[7], lpl::infer::ModelSegmentRole::FeedForward, shared, 2u, 1u),
+               "the residents in order, the rotary table after the final norm, then each layer's one shared expert");
     test.check(segments[0].offset == 384u && segments[1].offset == 1664u && segments[2].offset == 10432u &&
-                   segments[3].offset == 24640u && segments[4].offset == 38848u,
+                   segments[3].offset == 24640u && segments[4].offset == 38848u && segments[5].offset == 39040u,
                "each resident on the next 64 bytes after the one before, the first after the table");
     test.check(segments[0].length == 1268u && segments[1].length == 8712u && segments[2].length == 14208u &&
-                   segments[3].length == 14208u && segments[4].length == 192u && segments[5].length == 19008u &&
-                   segments[6].length == 19008u,
-               "each length the shape gives its role");
-    test.check(segments[5].offset == 40960u && segments[6].offset == 61440u, "each expert on the next 4 KiB boundary");
+                   segments[3].length == 14208u && segments[4].length == 192u && segments[5].length == 24u &&
+                   segments[6].length == 19008u && segments[7].length == 19008u,
+               "each length the shape gives its role, a word per pair for the rotary table");
+    test.check(segments[6].offset == 40960u && segments[7].offset == 61440u, "each expert on the next 4 KiB boundary");
     test.measure("image_bytes", static_cast<lpl::core::u32>(bytes));
 }
 
@@ -311,7 +319,7 @@ LPL_TEST(an_alignment_is_kept_from_4_kib_to_4_mib_and_refused_past_them)
     const lpl::core::u64 at2Mib =
         lpl::infer::layOutModelImage(parityShape(), kMadeUpVocabularyText, 21u, segments, kTableRoom);
 
-    test.check(at2Mib == 4194304u + 19008u && segments[5].offset == 2097152u && segments[6].offset == 4194304u,
+    test.check(at2Mib == 4194304u + 19008u && segments[6].offset == 2097152u && segments[7].offset == 4194304u,
                "at 2^21, the experts at 2 MiB and 4 MiB");
     test.check(lpl::infer::layOutModelImage(parityShape(), kMadeUpVocabularyText, 11u, segments, kTableRoom) == 0u &&
                    lpl::infer::layOutModelImage(parityShape(), kMadeUpVocabularyText, 23u, segments, kTableRoom) == 0u,
@@ -319,8 +327,8 @@ LPL_TEST(an_alignment_is_kept_from_4_kib_to_4_mib_and_refused_past_them)
     test.check(lpl::infer::layOutModelImage(badHeads, kMadeUpVocabularyText, 12u, segments, kTableRoom) == 0u &&
                    lpl::infer::layOutModelImage(parityShape(), 0u, 12u, segments, kTableRoom) == 0u,
                "so are 5 heads over a width of 48, and no vocabulary text");
-    test.check(lpl::infer::layOutModelImage(parityShape(), kMadeUpVocabularyText, 12u, segments, 6u) == 0u,
-               "and a table of 7 entries into room for 6");
+    test.check(lpl::infer::layOutModelImage(parityShape(), kMadeUpVocabularyText, 12u, segments, 7u) == 0u,
+               "and a table of 8 entries into room for 7");
 }
 
 /**
@@ -353,17 +361,19 @@ LPL_TEST(a_written_image_is_accepted_and_reads_back_to_the_same_weights)
                "its header and table are accepted");
     test.check(inspection.header.alignmentLog2 == 12u && inspection.header.segmentCount == kParitySegments &&
                    inspection.header.imageBytes == size,
-               "at 4 KiB, with 7 segments, as long as written");
+               "at 4 KiB, with 8 segments, as long as written");
     test.check(everySegmentSigned, "and each segment's bytes give its signature");
-    test.check(segments[4].signature == foldBytes(image, segments[4].offset, segments[4].length),
+    const lpl::infer::ModelSegment &finalNorm = segments[kFinalNormEntry - 1u];
+    const lpl::infer::ModelSegment &rotary = segments[kRotaryEntry - 1u];
+    test.check(finalNorm.signature == foldBytes(image, finalNorm.offset, finalNorm.length),
                "the final norm's signature is the FNV-1a of its bytes, folded apart");
-    test.check(zeroBetween(image, segments[4].offset + segments[4].length, segments[5].offset),
+    test.check(zeroBetween(image, rotary.offset + rotary.length, segments[kFirstExpertEntry - 1u].offset),
                "the padding before the first expert is zero");
     test.check(reopened.open(arena, image, size) && reopened.fold(kFnv1aOffsetBasis) == model.fold(kFnv1aOffsetBasis),
                "it reads back to the same weights, bit for bit");
     test.check(sameVocabulary(reopened.vocab(), model.vocab()), "and the same tokens, which the weights do not fold");
     test.measure("image_bytes", size);
-    test.measure("first_expert_offset", static_cast<lpl::core::u32>(segments[5].offset));
+    test.measure("first_expert_offset", static_cast<lpl::core::u32>(segments[kFirstExpertEntry - 1u].offset));
 }
 
 /**
@@ -423,8 +433,8 @@ LPL_TEST(an_image_written_at_64_kib_reads_back_with_its_experts_on_that_boundary
     const lpl::infer::ModelImageInspection inspection =
         lpl::infer::inspectModelImage(image, size, segments, kTableRoom);
     test.check(inspection.verdict == lpl::infer::ModelImageVerdict::Accepted &&
-                   inspection.header.alignmentLog2 == 16u && segments[5].offset % 65536u == 0u &&
-                   segments[6].offset % 65536u == 0u,
+                   inspection.header.alignmentLog2 == 16u && segments[kFirstExpertEntry - 1u].offset % 65536u == 0u &&
+                   segments[kSecondExpertEntry - 1u].offset % 65536u == 0u,
                "accepted, each expert on a 64 KiB boundary");
     test.check(reopened.open(arena, image, size) && reopened.fold(kFnv1aOffsetBasis) == model.fold(kFnv1aOffsetBasis),
                "and it reads back to the same weights");
@@ -449,10 +459,11 @@ LPL_TEST(every_corruption_of_the_header_or_the_table_is_refused_by_name)
     if (image == nullptr)
         return;
 
-    const lpl::core::u32 firstExpertOffset = wordAt(image, entryAt(6u) + kEntryOffset);
+    const lpl::core::u32 firstExpertOffset = wordAt(image, entryAt(kFirstExpertEntry) + kEntryOffset);
     const lpl::core::u32 embeddingOffset = wordAt(image, entryAt(2u) + kEntryOffset);
-    const lpl::core::u32 lastExpertOffset = wordAt(image, entryAt(7u) + kEntryOffset);
-    const lpl::core::u32 lastExpertLength = wordAt(image, entryAt(7u) + kEntryLength);
+    const lpl::core::u32 lastExpertOffset = wordAt(image, entryAt(kSecondExpertEntry) + kEntryOffset);
+    const lpl::core::u32 lastExpertLength = wordAt(image, entryAt(kSecondExpertEntry) + kEntryLength);
+    const lpl::core::u32 rotaryLength = wordAt(image, entryAt(kRotaryEntry) + kEntryLength);
 
     test.check(lpl::infer::inspectModelImage(image, 63u, segments, kTableRoom).verdict ==
                    lpl::infer::ModelImageVerdict::TooShort,
@@ -472,33 +483,40 @@ LPL_TEST(every_corruption_of_the_header_or_the_table_is_refused_by_name)
     test.check(
         refusedWith(image, size, kHeaderImageBytesWord, size + 1u, lpl::infer::ModelImageVerdict::BadImageBytes, 0u),
         "a header claiming one byte more than the image");
-    test.check(refusedWith(image, size, kHeaderCountWord, 6u, lpl::infer::ModelImageVerdict::BadSegmentCount, 0u) &&
+    test.check(refusedWith(image, size, kHeaderCountWord, 7u, lpl::infer::ModelImageVerdict::BadSegmentCount, 0u) &&
                    refusedWith(image, size, kHeaderCountWord, kTableRoom + 1u,
                                lpl::infer::ModelImageVerdict::BadSegmentCount, 0u),
-               "6 segments for 2 layers, or more than the room given");
+               "7 segments for 2 layers, or more than the room given");
     test.check(
         refusedWith(image, size, entryAt(1u) + kEntryRole, 2u, lpl::infer::ModelImageVerdict::SegmentUnexpected, 1u) &&
             refusedWith(image, size, entryAt(3u) + kEntryReserved, 1u, lpl::infer::ModelImageVerdict::SegmentUnexpected,
                         3u),
         "an embedding where the vocabulary goes, an entry's reserved word set");
-    test.check(refusedWith(image, size, entryAt(7u) + kEntryLength, lastExpertLength + 1u,
-                           lpl::infer::ModelImageVerdict::SegmentWrongLength, 7u),
+    test.check(refusedWith(image, size, entryAt(kRotaryEntry) + kEntryRole,
+                           static_cast<lpl::core::u32>(lpl::infer::ModelSegmentRole::FinalNorm),
+                           lpl::infer::ModelImageVerdict::SegmentUnexpected, kRotaryEntry),
+               "a second final norm where the rotary table goes");
+    test.check(refusedWith(image, size, entryAt(kRotaryEntry) + kEntryLength, rotaryLength - kWordBytes,
+                           lpl::infer::ModelImageVerdict::SegmentWrongLength, kRotaryEntry),
+               "a rotary table one pair shorter than the heads' pairs");
+    test.check(refusedWith(image, size, entryAt(kSecondExpertEntry) + kEntryLength, lastExpertLength + 1u,
+                           lpl::infer::ModelImageVerdict::SegmentWrongLength, kSecondExpertEntry),
                "an expert one byte longer than its shape");
-    test.check(refusedWith(image, size, entryAt(6u) + kEntryOffset, firstExpertOffset + 64u,
-                           lpl::infer::ModelImageVerdict::SegmentMisaligned, 6u),
+    test.check(refusedWith(image, size, entryAt(kFirstExpertEntry) + kEntryOffset, firstExpertOffset + 64u,
+                           lpl::infer::ModelImageVerdict::SegmentMisaligned, kFirstExpertEntry),
                "an expert 64 bytes off its boundary");
     test.check(refusedWith(image, size, entryAt(2u) + kEntryOffset, embeddingOffset - 64u,
                            lpl::infer::ModelImageVerdict::SegmentOverlaps, 2u),
                "an embedding starting inside the vocabulary");
-    test.check(refusedWith(image, size, entryAt(7u) + kEntryOffset, lastExpertOffset + 4096u,
-                           lpl::infer::ModelImageVerdict::SegmentOutside, 7u),
+    test.check(refusedWith(image, size, entryAt(kSecondExpertEntry) + kEntryOffset, lastExpertOffset + 4096u,
+                           lpl::infer::ModelImageVerdict::SegmentOutside, kSecondExpertEntry),
                "the last expert one page further, past the image");
-    test.check(refusedWith(image, size, entryAt(7u) + kEntryOffset, ((size / 4096u) + 2u) * 4096u,
-                           lpl::infer::ModelImageVerdict::SegmentOutside, 7u),
+    test.check(refusedWith(image, size, entryAt(kSecondExpertEntry) + kEntryOffset, ((size / 4096u) + 2u) * 4096u,
+                           lpl::infer::ModelImageVerdict::SegmentOutside, kSecondExpertEntry),
                "the last expert starting past the image's end");
     test.check(lpl::infer::inspectModelImage(image, size, segments, kParitySegments - 1u).verdict ==
                    lpl::infer::ModelImageVerdict::BadSegmentCount,
-               "a table of 7 entries into room for 6");
+               "a table of 8 entries into room for 7");
     test.check(refusedWith(image, 100u, kHeaderImageBytesWord, 100u, lpl::infer::ModelImageVerdict::TooShort, 0u),
                "100 bytes that say 100 but cannot hold the table");
     test.check(lpl::infer::inspectModelImage(image, size, segments, kTableRoom).verdict ==
@@ -525,21 +543,168 @@ LPL_TEST(a_changed_byte_fails_its_segment_s_signature_and_the_image_does_not_ope
     if (image == nullptr)
         return;
 
-    const lpl::core::u32 inside = wordAt(image, entryAt(7u) + kEntryOffset) + 1000u;
+    const lpl::core::u32 inside = wordAt(image, entryAt(kSecondExpertEntry) + kEntryOffset) + 1000u;
     image[inside] = static_cast<lpl::core::u8>(image[inside] ^ 0x01u);
     const lpl::infer::ModelImageInspection inspection =
         lpl::infer::inspectModelImage(image, size, segments, kTableRoom);
+    const lpl::infer::ModelSegment &first = segments[kFirstExpertEntry - 1u];
+    const lpl::infer::ModelSegment &second = segments[kSecondExpertEntry - 1u];
 
     test.check(inspection.verdict == lpl::infer::ModelImageVerdict::Accepted, "the table is still accepted");
-    test.check(lpl::infer::modelSegmentSignature(image, segments[6]) != segments[6].signature &&
-                   lpl::infer::modelSegmentSignature(image, segments[5]) == segments[5].signature,
+    test.check(lpl::infer::modelSegmentSignature(image, second) != second.signature &&
+                   lpl::infer::modelSegmentSignature(image, first) == first.signature,
                "the second expert's signature fails, the first's holds");
     test.check(!reopened.open(arena, image, size), "the image does not open");
     const lpl::infer::ModelReadReport copied = reopened.copy(arena, image, size);
-    test.check(copied.verdict == lpl::infer::ModelReadVerdict::SignatureMismatch && copied.segment == 7u,
-               "and its copy says why: entry 7's signature");
+    test.check(copied.verdict == lpl::infer::ModelReadVerdict::SignatureMismatch &&
+                   copied.segment == kSecondExpertEntry,
+               "and its copy says why: entry 8's signature");
     image[inside] = static_cast<lpl::core::u8>(image[inside] ^ 0x01u);
     test.check(reopened.open(arena, image, size), "and opens once the byte is put back");
+}
+
+/**
+ * @brief The writer puts the model's rotary table in its segment, a little-endian word per pair, and both readings take
+ *        it from there: a made-up table put in its place, its signature put right, is the one a copy and a reading in
+ *        place give back, the latter where it lies, and the weights' fold tells that model from the one written.
+ */
+LPL_TEST(an_image_carries_its_rotary_table_through_a_copy_and_a_reading_in_place)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+    lpl::infer::Model copied;
+    lpl::infer::Model viewed;
+    lpl::infer::ModelSegment segments[kTableRoom];
+    lpl::core::u32 size = 0u;
+
+    test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
+    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    test.check(image != nullptr, "and is written on a word boundary");
+    if (image == nullptr)
+        return;
+
+    const lpl::infer::ModelImageInspection inspection =
+        lpl::infer::inspectModelImage(image, size, segments, kTableRoom);
+    const lpl::infer::ModelSegment rotary = segments[kRotaryEntry - 1u];
+    const lpl::infer::RotaryFrequencies written = model.rotaryFrequencies();
+    const lpl::core::u32 at = static_cast<lpl::core::u32>(rotary.offset);
+    test.check(inspection.verdict == lpl::infer::ModelImageVerdict::Accepted &&
+                   rotary.role == lpl::infer::ModelSegmentRole::Rotary && rotary.length == kParityPairs * kWordBytes,
+               "the image is accepted, its sixth entry a rotary table of a word per pair");
+    if (rotary.role != lpl::infer::ModelSegmentRole::Rotary || written.pairs != kParityPairs)
+        return;
+
+    bool everyWritten = true;
+    for (lpl::core::u32 pair = 0u; everyWritten && pair < kParityPairs; ++pair)
+        everyWritten = wordAt(image, at + pair * kWordBytes) == written.turnsPerPosition[pair];
+    test.check(everyWritten, "the writer puts each pair's turns in the segment, little-endian");
+
+    for (lpl::core::u32 pair = 0u; pair < kParityPairs; ++pair)
+        putWordAt(image, at + pair * kWordBytes, kMadeUpTurnStep * (pair + 1u));
+    putWordAt(image, entryAt(kRotaryEntry) + kEntrySignature, foldBytes(image, rotary.offset, rotary.length));
+
+    const bool copyRead = copied.open(arena, image, size);
+    const bool viewRead = viewed.view(arena, image, size).verdict == lpl::infer::ModelReadVerdict::Read;
+    const lpl::infer::RotaryFrequencies fromCopy = copied.rotaryFrequencies();
+    const lpl::infer::RotaryFrequencies fromView = viewed.rotaryFrequencies();
+    bool everyRead = copyRead && viewRead && fromCopy.pairs == kParityPairs && fromView.pairs == kParityPairs;
+    for (lpl::core::u32 pair = 0u; everyRead && pair < kParityPairs; ++pair)
+        everyRead = fromCopy.turnsPerPosition[pair] == kMadeUpTurnStep * (pair + 1u) &&
+                    fromView.turnsPerPosition[pair] == kMadeUpTurnStep * (pair + 1u);
+    test.check(everyRead, "a copy and a reading in place give back the table the image holds, not the seed's");
+    test.check(viewRead && inside(fromView.turnsPerPosition, image, size), "the reading in place where it lies");
+    test.check(copyRead && !inside(fromCopy.turnsPerPosition, image, size), "the copy in the arena");
+    test.check(copyRead && copied.fold(kFnv1aOffsetBasis) != model.fold(kFnv1aOffsetBasis),
+               "and the weights' fold covers the table: the model read differs from the one written by it alone");
+}
+
+/**
+ * @brief A byte changed in the rotary table leaves the table of segments accepted, but fails the rotary table's
+ *        signature: neither a copy nor a reading in place takes the image, and both name entry 6.
+ */
+LPL_TEST(a_changed_byte_of_the_rotary_table_fails_its_signature)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+    lpl::infer::Model copied;
+    lpl::infer::Model viewed;
+    lpl::infer::ModelSegment segments[kTableRoom];
+    lpl::core::u32 size = 0u;
+
+    test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
+    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    test.check(image != nullptr, "and is written on a word boundary");
+    if (image == nullptr)
+        return;
+
+    const lpl::infer::ModelImageInspection before = lpl::infer::inspectModelImage(image, size, segments, kTableRoom);
+    const lpl::infer::ModelSegment rotary = segments[kRotaryEntry - 1u];
+    test.check(before.verdict == lpl::infer::ModelImageVerdict::Accepted &&
+                   rotary.role == lpl::infer::ModelSegmentRole::Rotary,
+               "its sixth entry is the rotary table");
+    if (rotary.role != lpl::infer::ModelSegmentRole::Rotary)
+        return;
+
+    const lpl::core::u32 changed = static_cast<lpl::core::u32>(rotary.offset) + kWordBytes + 1u;
+    image[changed] = static_cast<lpl::core::u8>(image[changed] ^ 0x01u);
+    const lpl::infer::ModelImageInspection after = lpl::infer::inspectModelImage(image, size, segments, kTableRoom);
+    const bool rotaryFails = lpl::infer::modelSegmentSignature(image, rotary) != rotary.signature;
+    const lpl::infer::ModelReadReport copy = copied.copy(arena, image, size);
+    const lpl::infer::ModelReadReport view = viewed.view(arena, image, size);
+    image[changed] = static_cast<lpl::core::u8>(image[changed] ^ 0x01u);
+
+    test.check(after.verdict == lpl::infer::ModelImageVerdict::Accepted && rotaryFails,
+               "the table of segments is still accepted, the rotary table's signature fails");
+    test.check(copy.verdict == lpl::infer::ModelReadVerdict::SignatureMismatch && copy.segment == kRotaryEntry &&
+                   !copied.ready(),
+               "a copy refuses entry 6's signature");
+    test.check(view.verdict == lpl::infer::ModelReadVerdict::SignatureMismatch && view.segment == kRotaryEntry &&
+                   !viewed.ready(),
+               "and so does a reading in place");
+}
+
+/**
+ * @brief A model of one channel per head has no pair to turn: its rotary table is empty, and it still builds, writes
+ *        an image whose rotary segment is empty, and reads back from it by a copy and in place.
+ */
+LPL_TEST(a_model_of_one_channel_per_head_has_an_empty_rotary_table_and_still_reads_back)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+    lpl::infer::Model copied;
+    lpl::infer::Model viewed;
+    lpl::infer::ModelSegment segments[kTableRoom];
+    lpl::core::u32 size = 0u;
+
+    test.check(lpl::infer::buildParityVocab(arena, vocab), "the canonical vocabulary builds");
+    lpl::infer::ModelConfig shape = lpl::infer::parityModelConfig();
+    shape.vocabSize = vocab.size();
+    shape.heads = shape.dim;
+    test.check(model.synthesise(arena, shape, vocab, lpl::infer::parityModelSeed()) &&
+                   model.rotaryFrequencies().pairs == 0u,
+               "a model of 48 heads of one channel builds, its table empty");
+
+    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    test.check(image != nullptr, "and its image is written");
+    if (image == nullptr)
+        return;
+
+    const lpl::infer::ModelImageInspection inspection =
+        lpl::infer::inspectModelImage(image, size, segments, kTableRoom);
+    test.check(inspection.verdict == lpl::infer::ModelImageVerdict::Accepted &&
+                   segments[kRotaryEntry - 1u].role == lpl::infer::ModelSegmentRole::Rotary &&
+                   segments[kRotaryEntry - 1u].length == 0u,
+               "accepted, its rotary segment empty");
+    test.check(copied.open(arena, image, size) && copied.rotaryFrequencies().pairs == 0u &&
+                   copied.fold(kFnv1aOffsetBasis) == model.fold(kFnv1aOffsetBasis),
+               "a copy reads it back");
+    test.check(viewed.view(arena, image, size).verdict == lpl::infer::ModelReadVerdict::Read &&
+                   viewed.rotaryFrequencies().pairs == 0u &&
+                   viewed.fold(kFnv1aOffsetBasis) == model.fold(kFnv1aOffsetBasis),
+               "and so does a reading in place");
 }
 
 /**
@@ -718,14 +883,14 @@ LPL_TEST(every_refusal_of_a_reading_in_place_names_what_it_refuses)
     if (image == nullptr)
         return;
 
-    const lpl::core::u32 inExpert = wordAt(image, entryAt(7u) + kEntryOffset) + 1000u;
+    const lpl::core::u32 inExpert = wordAt(image, entryAt(kSecondExpertEntry) + kEntryOffset) + 1000u;
     image[inExpert] = static_cast<lpl::core::u8>(image[inExpert] ^ 0x01u);
     lpl::infer::Model flipped;
     const lpl::infer::ModelReadReport mismatch = flipped.view(arena, image, size);
     image[inExpert] = static_cast<lpl::core::u8>(image[inExpert] ^ 0x01u);
-    test.check(mismatch.verdict == lpl::infer::ModelReadVerdict::SignatureMismatch && mismatch.segment == 7u &&
-                   !flipped.ready(),
-               "a flipped lane of the second expert fails entry 7's signature");
+    test.check(mismatch.verdict == lpl::infer::ModelReadVerdict::SignatureMismatch &&
+                   mismatch.segment == kSecondExpertEntry && !flipped.ready(),
+               "a flipped lane of the second expert fails entry 8's signature");
 
     const lpl::core::u32 magic = wordAt(image, 0u);
     putWordAt(image, 0u, 0x4D4C504Du);
