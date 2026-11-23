@@ -105,7 +105,7 @@ struct ModelConfig {
     core::u32 contextLength{0u}; ///< Positions the cache can hold.
     core::u32 vocabSize{0u};     ///< Tokens; must equal the bound vocabulary's size.
     core::u32 normEpsilon{0u};   ///< Added to the mean of the squares before its root, in units of 2^-32; 0 adds none.
-    core::u32 keyValueHeads{0u}; ///< Key and value heads, each read by headsPerKeyValueHead() query heads.
+    core::u32 keyValueHeads{0u}; ///< Key and value heads; must divide @c heads, each read by that many query heads.
 
     /**
      * @brief Width of one attention head.
@@ -392,7 +392,7 @@ private:
 
 } // namespace lpl::infer
 
-#        include <lpl/infer/Model.inl>
+#        include "Model.inl"
 
 #    endif // LPL_HAS_FOUNDATION
 

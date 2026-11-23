@@ -1,3 +1,6 @@
+#ifndef LPL_LPL_INFER_MODEL_INL
+#define LPL_LPL_INFER_MODEL_INL
+
 namespace lpl::infer {
 
 constexpr core::u32 ModelConfig::headsPerKeyValueHead() const noexcept
@@ -12,3 +15,5 @@ constexpr bool ModelConfig::valid() const noexcept
 }
 
 } // namespace lpl::infer
+
+#endif /* LPL_LPL_INFER_MODEL_INL */

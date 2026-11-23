@@ -1,7 +1,11 @@
+#include "model_image_writer.hpp"
+
+#include <lpl/infer/Attention.hpp>
 #include <lpl/infer/KvCache.hpp>
 #include <lpl/infer/Model.hpp>
 #include <lpl/infer/ModelImage.hpp>
 #include <lpl/infer/Parity.hpp>
+#include <lpl/infer/Quant.hpp>
 #include <lpl/infer/TensorArena.hpp>
 #include <lpl/infer/Transformer.hpp>
 #include <lpl/testing/Test.hpp>
@@ -19,6 +23,10 @@ constexpr lpl::core::u32 kTokenStride = 37u;         ///< Step between the token
 constexpr lpl::core::u32 kTableRoom = 16u;
 constexpr lpl::core::u32 kWordBytes = 4u;
 constexpr lpl::core::usize kCacheArenaBytes = 192u * 1024u;
+constexpr lpl::core::u32 kParityWidth = 48u;     ///< The parity model's residual stream.
+constexpr lpl::core::u32 kGroupedKeyWidth = 16u; ///< Its keys with 2 key/value heads of 8 channels.
+constexpr lpl::core::u32 kTurnedPosition = 5u;   ///< Where the token whose key is checked stands.
+constexpr lpl::core::u32 kTurnedToken = 7u;      ///< That token.
 
 /**
  * @name SmolLM2-135M-Instruct's shape, from its config.json
@@ -182,22 +190,6 @@ void spreadAttention(const lpl::core::u8 *from, lpl::core::u8 *to, const lpl::in
 }
 
 /**
- * @brief Writes @p model's image into @p arena, on a word boundary.
- * @return The image, or nullptr when the writer refused or the arena is short; @p size receives its bytes.
- */
-[[nodiscard]] lpl::core::u8 *writeImage(lpl::infer::TensorArena &arena, const lpl::infer::Model &model,
-                                        lpl::core::u32 &size)
-{
-    size = model.blobBytes();
-    lpl::core::u32 *const words = size != 0u ? arena.claim<lpl::core::u32>(size / kWordBytes + 1u) : nullptr;
-    if (words == nullptr)
-        return nullptr;
-
-    lpl::core::u8 *const image = reinterpret_cast<lpl::core::u8 *>(words);
-    return model.writeBlob(image, size) == size ? image : nullptr;
-}
-
-/**
  * @brief Feeds the same kThinkingSteps tokens to @p first and @p second, and compares their logits at every step.
  */
 [[nodiscard]] Thought thinkSideBySide(lpl::infer::TensorArena &arena, const lpl::infer::Model &first,
@@ -246,7 +238,7 @@ LPL_TEST(a_shape_needs_key_value_heads_that_divide_its_heads)
     shape.heads = kGroupedHeads;
 
     shape.keyValueHeads = 0u;
-    const bool noneRefused = !shape.valid();
+    const bool noneRefused = !shape.valid() && shape.headsPerKeyValueHead() == 0u;
     shape.keyValueHeads = 4u;
     const bool fourRefused = !shape.valid();
     shape.keyValueHeads = kGroupedKeyValueHeads;
@@ -254,10 +246,70 @@ LPL_TEST(a_shape_needs_key_value_heads_that_divide_its_heads)
     shape.keyValueHeads = kGroupedHeads;
     const bool sixAccepted = shape.valid() && shape.keyValueWidth() == 48u && shape.headsPerKeyValueHead() == 1u;
 
-    test.check(noneRefused, "a shape without key/value heads is refused");
+    test.check(noneRefused, "a shape without key/value heads is refused, no query head reading any");
     test.check(fourRefused, "so is one of 4 key/value heads for 6 heads");
     test.check(twoAccepted, "2 for 6 holds: keys 16 wide, 3 query heads to each");
     test.check(sixAccepted, "and 6 for 6, one key/value head to each query head");
+}
+
+/**
+ * @brief A token fed at position 5 leaves in the first layer's cache its key turned by that position: the key projected
+ *        from its normed embedding, then each of its 2 key/value heads rotated as a query head is.
+ *
+ * @details Recomputed apart from attentionBlock from the steps it is made of, each tested on its own: rmsNorm, the
+ *          quantised projection, applyRotaryEmbedding. The key left unturned is the control, which must differ.
+ */
+LPL_TEST(the_cache_holds_each_key_turned_by_its_position)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+    lpl::infer::Transformer pass;
+    lpl::infer::KvCache cache;
+    lpl::math::Fixed32 residual[kParityWidth] = {};
+    lpl::math::Fixed32 normed[kParityWidth] = {};
+    lpl::math::Fixed32 unturned[kGroupedKeyWidth] = {};
+    lpl::math::Fixed32 turned[kGroupedKeyWidth] = {};
+    lpl::infer::QuantBlock blocks[lpl::infer::quantBlockCount(kParityWidth)] = {};
+
+    test.check(lpl::infer::buildParityVocab(arena, vocab), "the canonical vocabulary builds");
+    lpl::infer::ModelConfig shape = lpl::infer::parityModelConfig();
+    shape.vocabSize = vocab.size();
+    shape.heads = kGroupedHeads;
+    shape.keyValueHeads = kGroupedKeyValueHeads;
+    lpl::math::Fixed32 *const logits = arena.claim<lpl::math::Fixed32>(shape.vocabSize);
+    test.check(model.synthesise(arena, shape, vocab, lpl::infer::parityModelSeed()) && logits != nullptr &&
+                   pass.allocate(arena, model) &&
+                   cache.allocate(arena, model.config(), lpl::infer::CachePolicy::Refuse),
+               "a model of 6 heads for 2 key/value heads builds, with its pass and its cache");
+    if (!model.ready() || logits == nullptr || cache.capacity() == 0u)
+        return;
+    test.check(pass.forward(kTurnedToken, kTurnedPosition, cache, lpl::infer::VectorView{logits, shape.vocabSize}),
+               "token 7 is fed at position 5");
+
+    model.embed(kTurnedToken, lpl::infer::VectorView{residual, kParityWidth});
+    lpl::infer::rmsNorm(lpl::infer::ConstVectorView{residual, kParityWidth}, model.layer(0u).attentionNorm,
+                        shape.normEpsilon, lpl::infer::VectorView{normed, kParityWidth});
+    lpl::infer::quantiseRow(normed, kParityWidth, blocks);
+    lpl::infer::quantisedMatVecPrepared(model.layer(0u).key, blocks,
+                                        lpl::infer::VectorView{unturned, kGroupedKeyWidth});
+    for (lpl::core::u32 i = 0u; i < kGroupedKeyWidth; ++i)
+        turned[i] = unturned[i];
+    lpl::infer::applyRotaryEmbedding(lpl::infer::VectorView{turned, kGroupedKeyWidth}, kGroupedKeyValueHeads,
+                                     kGroupedKeyWidth / kGroupedKeyValueHeads, model.rotaryFrequencies(),
+                                     kTurnedPosition);
+
+    const lpl::infer::VectorView cached = cache.key(0u, 0u);
+    lpl::core::u32 differingFromTurned = cached.count == kGroupedKeyWidth ? 0u : kGroupedKeyWidth;
+    lpl::core::u32 differingFromUnturned = 0u;
+    for (lpl::core::u32 i = 0u; i < kGroupedKeyWidth && i < cached.count; ++i)
+    {
+        differingFromTurned += cached.at(i).raw() != turned[i].raw() ? 1u : 0u;
+        differingFromUnturned += cached.at(i).raw() != unturned[i].raw() ? 1u : 0u;
+    }
+    test.check(differingFromTurned == 0u, "the cached key is the projected key turned by position 5, bit for bit");
+    test.check(differingFromUnturned != 0u, "and not the key left unturned");
+    test.measure("unturned_differing_channels", differingFromUnturned);
 }
 
 /**
@@ -307,7 +359,10 @@ LPL_TEST(a_grouped_model_thinks_what_its_heads_spread_out_think)
                    grouped.layer(0u).query.rows == 48u,
                "its key and value matrices are 2 heads of 8 channels wide, its query 6");
 
-    const lpl::core::u8 *const image = grouped.ready() ? writeImage(arena, grouped, groupedSize) : nullptr;
+    const lpl::core::u8 *const image =
+        grouped.ready() ? lpl::infer::tests::writeModelImage(
+                              arena, grouped, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, groupedSize) :
+                          nullptr;
     const lpl::core::u8 *const byGroup =
         image != nullptr ? spreadKeyValueHeads(arena, image, groupedSize, KeyValueSpread::ByGroup, byGroupSize) :
                            nullptr;

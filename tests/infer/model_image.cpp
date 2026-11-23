@@ -1,3 +1,5 @@
+#include "model_image_writer.hpp"
+
 #include <lpl/infer/ModelImage.hpp>
 #include <lpl/infer/Parity.hpp>
 #include <lpl/testing/Test.hpp>
@@ -8,7 +10,6 @@ namespace {
 
 constexpr lpl::core::u32 kFnv1aOffsetBasis = 0x811C9DC5u;
 constexpr lpl::core::u32 kFnv1aPrime = 0x01000193u;
-constexpr lpl::core::u8 kDirtyByte = 0xA5u;
 constexpr lpl::core::u32 kImageVersion = 1u;
 constexpr lpl::core::u32 kRetiredImageBytes = 256u;
 constexpr lpl::core::u32 kParityVocabulary = 121u;
@@ -100,39 +101,6 @@ constexpr lpl::core::u32 kGroupedAttentionEntry = 3u; ///< One-based entry of th
 
     shape.vocabSize = vocab.size();
     return model.synthesise(arena, shape, vocab, lpl::infer::parityModelSeed());
-}
-
-/**
- * @brief Writes @p model's image at @p alignmentLog2 into @p arena.
- * @return The image, or nullptr when the writer refused or the arena is short; @p size receives its bytes.
- */
-[[nodiscard]] lpl::core::u8 *writeImage(lpl::infer::TensorArena &arena, const lpl::infer::Model &model,
-                                        lpl::core::u32 alignmentLog2, lpl::core::u32 &size)
-{
-    size = model.blobBytes(alignmentLog2);
-    lpl::core::u8 *const image = size != 0u ? arena.claim<lpl::core::u8>(size) : nullptr;
-    if (image == nullptr)
-        return nullptr;
-
-    for (lpl::core::u32 i = 0u; i < size; ++i)
-        image[i] = kDirtyByte;
-    return model.writeBlob(image, size, alignmentLog2) == size ? image : nullptr;
-}
-
-/**
- * @brief Writes @p model's image at 4 KiB into @p arena, its first byte @p shift bytes past a word boundary.
- * @return The image, or nullptr when the writer refused or the arena is short; @p size receives its bytes.
- */
-[[nodiscard]] lpl::core::u8 *writeImageShiftedBy(lpl::infer::TensorArena &arena, const lpl::infer::Model &model,
-                                                 lpl::core::u32 shift, lpl::core::u32 &size)
-{
-    size = model.blobBytes();
-    lpl::core::u32 *const words = size != 0u ? arena.claim<lpl::core::u32>(size / kWordBytes + 2u) : nullptr;
-    if (words == nullptr)
-        return nullptr;
-
-    lpl::core::u8 *const image = reinterpret_cast<lpl::core::u8 *>(words) + shift;
-    return model.writeBlob(image, size) == size ? image : nullptr;
 }
 
 /**
@@ -420,7 +388,8 @@ LPL_TEST(a_written_image_is_accepted_and_reads_back_to_the_same_weights)
     lpl::core::u32 size = 0u;
 
     test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
-    lpl::core::u8 *const image = writeImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, size);
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr && lpl::infer::modelImageVersion(image, size) == kImageVersion,
                "it is written as version 1");
     if (image == nullptr)
@@ -471,7 +440,8 @@ LPL_TEST(an_image_carries_its_model_s_norm_epsilon_and_reads_back_with_it)
                    model.config().normEpsilon == kNormEpsilon,
                "a model of epsilon 1e-5 builds");
 
-    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr, "and its image is written");
     if (image == nullptr)
         return;
@@ -502,7 +472,8 @@ LPL_TEST(an_image_carries_its_key_value_heads_and_reads_back_grouped)
 
     test.check(synthesiseGroupedModel(arena, vocab, model) && model.config().keyValueHeads == kGroupedKeyValueHeads,
                "a model of 6 heads for 2 key/value heads builds");
-    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr, "and its image is written");
     if (image == nullptr)
         return;
@@ -536,7 +507,8 @@ LPL_TEST(key_value_heads_that_do_not_divide_the_heads_are_refused_as_a_bad_shape
 
     fourForSix.keyValueHeads = 4u;
     test.check(synthesiseGroupedModel(arena, vocab, model), "a model of 6 heads for 2 key/value heads builds");
-    lpl::core::u8 *const image = writeImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, size);
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr, "and is written");
     if (image == nullptr)
         return;
@@ -566,7 +538,7 @@ LPL_TEST(an_image_written_at_64_kib_reads_back_with_its_experts_on_that_boundary
     lpl::core::u32 size = 0u;
 
     test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
-    lpl::core::u8 *const image = writeImage(arena, model, 16u, size);
+    lpl::core::u8 *const image = lpl::infer::tests::writeModelImage(arena, model, 16u, 0u, size);
     test.check(image != nullptr, "it is written at 2^16");
     if (image == nullptr)
         return;
@@ -595,7 +567,8 @@ LPL_TEST(every_corruption_of_the_header_or_the_table_is_refused_by_name)
     lpl::core::u32 size = 0u;
 
     test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
-    lpl::core::u8 *const image = writeImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, size);
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr, "and is written");
     if (image == nullptr)
         return;
@@ -696,7 +669,8 @@ LPL_TEST(a_changed_byte_fails_its_segment_s_signature_and_the_image_does_not_ope
     lpl::core::u32 size = 0u;
 
     test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
-    lpl::core::u8 *const image = writeImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, size);
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr, "and is written");
     if (image == nullptr)
         return;
@@ -737,7 +711,8 @@ LPL_TEST(an_image_carries_its_rotary_table_through_a_copy_and_a_reading_in_place
     lpl::core::u32 size = 0u;
 
     test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
-    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr, "and is written on a word boundary");
     if (image == nullptr)
         return;
@@ -792,7 +767,8 @@ LPL_TEST(a_changed_byte_of_the_rotary_table_fails_its_signature)
     lpl::core::u32 size = 0u;
 
     test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
-    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr, "and is written on a word boundary");
     if (image == nullptr)
         return;
@@ -846,7 +822,8 @@ LPL_TEST(a_model_of_one_channel_per_head_has_an_empty_rotary_table_and_still_rea
                    model.rotaryFrequencies().pairs == 0u,
                "a model of 48 heads of one channel builds, its table empty");
 
-    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr, "and its image is written");
     if (image == nullptr)
         return;
@@ -879,7 +856,8 @@ LPL_TEST(an_image_of_another_version_is_refused_by_name)
     lpl::core::u32 size = 0u;
 
     test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
-    lpl::core::u8 *const image = writeImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, size);
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr, "and is written");
     if (image == nullptr)
         return;
@@ -944,7 +922,8 @@ LPL_TEST(an_image_on_a_word_boundary_is_read_where_it_lies)
     lpl::core::u32 size = 0u;
 
     test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
-    const lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    const lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr, "and is written on a word boundary");
     if (image == nullptr)
         return;
@@ -991,7 +970,8 @@ LPL_TEST(an_image_off_a_word_boundary_is_refused_in_place_and_copied_by_open)
         lpl::infer::Model viewed;
         lpl::infer::Model copied;
         lpl::core::u32 size = 0u;
-        const lpl::core::u8 *const image = writeImageShiftedBy(arena, model, shift, size);
+        const lpl::core::u8 *const image =
+            lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, shift, size);
         test.check(image != nullptr, "the image is written off a word boundary");
         if (image == nullptr)
             return;
@@ -1037,7 +1017,8 @@ LPL_TEST(every_refusal_of_a_reading_in_place_names_what_it_refuses)
     lpl::core::u32 size = 0u;
 
     test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
-    lpl::core::u8 *const image = writeImageShiftedBy(arena, model, 0u, size);
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
     test.check(image != nullptr, "and is written on a word boundary");
     if (image == nullptr)
         return;

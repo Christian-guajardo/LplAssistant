@@ -2,7 +2,7 @@
  * @file ModelImage.hpp
  * @brief The layout of a `.lplmind` image, laid out for paging.
  *
- * An image opens on a header of 72 bytes and the table of its segments, so that whoever maps it reads
+ * An image opens on a header of 76 bytes and the table of its segments, so that whoever maps it reads
  * where every segment lies without touching a page that is not mapped yet. The resident segments (the
  * vocabulary, the embedding, each layer's attention, the final norm and the rotary table) follow the table, 64-byte
  * aligned; each expert, a layer's feed-forward matrices one after the other, starts on a boundary of the image's
@@ -19,7 +19,7 @@
  * All words are little-endian. The header: magic, version, header bytes, alignment as a power of two, flags,
  * segment count, the image's bytes on 64 bits, the shape (dim, layers, heads, feed-forward width, context,
  * vocabulary size), the vocabulary's text bytes, the norm's epsilon in units of 2^-32, the merge count, the
- * pre-tokenizer (PreTokenizer). A segment: role, residency,
+ * pre-tokenizer (PreTokenizer), the key/value heads. A segment: role, residency,
  * layer and expert one-based (0 for none), offset and length on 64 bits, FNV-1a signature, a reserved word.
  *
  * @author MasterLaplace
