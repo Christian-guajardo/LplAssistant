@@ -4,7 +4,8 @@
  *
  * llama.cpp runs a sequence in one decode, every position's logits kept, its keys cached in F32 rather than its default
  * F16 (llama.cpp:18523), its values in F16, the only type b3775 caches them in without flash attention
- * (llama.cpp:18719-18720), and the residual stream's peak read at each layer's output (`l_out`). lpl::infer runs the
+ * (llama.cpp:18719-18720), and the residual stream's peak read after each layer's attention and feed-forward
+ * (`ffn_inp` and `l_out`). lpl::infer runs the
  * image layer by layer through attentionBlock and feedForwardBlock, so that its residual stream's peak and the values
  * it saturates are counted, and its logits must equal Transformer::forward's, bit for bit. Two engines agree at a
  * position when their most likely tokens are the same; a position is judged when llama.cpp's own margin between its
@@ -52,7 +53,7 @@ struct PositionAgreement {
  */
 struct SequenceAgreement {
     std::vector<PositionAgreement> positions; ///< One per token.
-    double referenceResidualPeak{0.0};        ///< llama.cpp's largest |value| of a layer's output.
+    double referenceResidualPeak{0.0};        ///< llama.cpp's largest |value| of the residual stream.
     double imageResidualPeak{0.0};            ///< lpl::infer's, after each block.
     std::uint64_t imageSaturations{0u};       ///< Residual values lpl::infer held at Q16.16's bounds.
     bool imageMatchesForward{false};          ///< Its logits are Transformer::forward's, bit for bit.
@@ -99,8 +100,8 @@ public:
      * @brief Runs @p tokens from position 0 in one decode, in a context of their own.
      * @param tokens       The sequence.
      * @param logits       Receives one row of the vocabulary's logits per position.
-     * @param residualPeak Receives the largest |value| of a layer's output.
-     * @return false when llama.cpp refuses the decode.
+     * @param residualPeak Receives the largest |value| of the residual stream after each block.
+     * @return false for no token, or when llama.cpp refuses the context or the decode.
      */
     [[nodiscard]] bool run(const std::vector<std::uint32_t> &tokens, std::vector<float> &logits, double &residualPeak);
 
@@ -152,6 +153,24 @@ private:
  */
 [[nodiscard]] bool compareSequence(ReferenceModel &reference, const infer::Model &model,
                                    const std::vector<std::uint32_t> &tokens, SequenceAgreement &out);
+
+/**
+ * @brief Whether an image agrees with llama.cpp over @p sequences: each ran, its logits Transformer::forward's, and
+ *        no judged position of any disagrees, at least one judged in all.
+ * @param sequences The comparisons of the image's sequences.
+ * @return The verdict; false for no sequence.
+ */
+[[nodiscard]] bool agreesAtEveryJudgedPosition(const std::vector<SequenceAgreement> &sequences) noexcept;
+
+/**
+ * @brief Whether a control fails the agreement as a control must: it disagrees with llama.cpp at a judged position,
+ *        and lies further from it than the image does.
+ * @param control The comparisons of the control's sequences.
+ * @param image   The comparisons of the image's.
+ * @return The verdict.
+ */
+[[nodiscard]] bool controlFails(const std::vector<SequenceAgreement> &control,
+                                const std::vector<SequenceAgreement> &image) noexcept;
 
 /**
  * @enum Control

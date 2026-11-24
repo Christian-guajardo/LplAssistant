@@ -83,13 +83,14 @@ struct Converted {
  * @brief What comparing a model with llama.cpp over the sequences found.
  */
 struct Judgement {
-    bool ran{true};                        ///< Every sequence ran in both engines.
-    bool everyForwardMatched{true};        ///< The layer-by-layer logits were Transformer::forward's.
-    std::uint32_t judged{0u};              ///< Positions judged.
-    std::uint32_t judgedDisagreements{0u}; ///< Judged positions that disagree.
-    std::uint32_t positions{0u};           ///< Positions run.
-    std::uint32_t agreements{0u};          ///< Positions, judged or not, that agree.
-    double largestLogitDifference{0.0};    ///< Over every position.
+    bool ran{true};                                         ///< Every sequence ran in both engines.
+    bool everyForwardMatched{true};                         ///< The layer-by-layer logits were Transformer::forward's.
+    std::uint32_t judged{0u};                               ///< Positions judged.
+    std::uint32_t judgedDisagreements{0u};                  ///< Judged positions that disagree.
+    std::uint32_t positions{0u};                            ///< Positions run.
+    std::uint32_t agreements{0u};                           ///< Positions, judged or not, that agree.
+    double largestLogitDifference{0.0};                     ///< Over every position.
+    std::vector<lpl::convert::SequenceAgreement> sequences; ///< Each sequence's comparison.
 };
 
 /**
@@ -107,6 +108,7 @@ struct Judgement {
         judgement.judgedDisagreements += agreement.judgedDisagreements();
         judgement.agreements += agreement.agreements();
         judgement.positions += static_cast<std::uint32_t>(agreement.positions.size());
+        judgement.sequences.push_back(agreement);
         for (const lpl::convert::PositionAgreement &position : agreement.positions)
             judgement.largestLogitDifference =
                 std::fmax(judgement.largestLogitDifference, position.largestLogitDifference);
@@ -129,6 +131,7 @@ void checkAgreement(lpl::testing::Test &test, lpl::convert::tests::SyntheticWeig
         test.check(judgement.everyForwardMatched, "the image's logits, layer by layer, are Transformer::forward's");
         test.check(judgement.judged >= kLeastJudged, "at least 40 positions have a margin of a logit to judge");
         test.check(judgement.judgedDisagreements == 0u, "and at each, both engines pick the same token");
+        test.check(lpl::convert::agreesAtEveryJudgedPosition(judgement.sequences), "which the verdict says too");
         test.measure("judged", judgement.judged);
         test.measure("agreements", judgement.agreements);
         test.measure("positions", judgement.positions);
@@ -212,6 +215,10 @@ LPL_TEST(a_control_made_wrong_on_purpose_disagrees_with_llama_cpp)
         test.check(keyValue.ran && keyValue.judgedDisagreements > 0u,
                    "the keys and values swapped disagree at a judged position");
         test.check(rotary.ran && rotary.judgedDisagreements > 0u, "and so does the rotary table of base 100000");
+        test.check(lpl::convert::controlFails(keyValue.sequences, image.sequences) &&
+                       lpl::convert::controlFails(rotary.sequences, image.sequences) &&
+                       !lpl::convert::agreesAtEveryJudgedPosition(keyValue.sequences),
+                   "so both fail as controls, which the agreement's verdict refuses");
         test.measure("key_value_swapped_disagreements", keyValue.judgedDisagreements);
         test.measure("rotary_base_disagreements", rotary.judgedDisagreements);
         test.measure("key_value_swapped_largest_difference_thousandths",
@@ -220,4 +227,46 @@ LPL_TEST(a_control_made_wrong_on_purpose_disagrees_with_llama_cpp)
                      static_cast<lpl::core::u32>(rotary.largestLogitDifference * 1000.0));
     }
     std::filesystem::remove(converted.path);
+}
+
+/**
+ * @brief The verdicts, on comparisons made by hand: an image agrees when every sequence ran, its logits forward's,
+ *        no judged position disagrees and one was judged; a control fails when it disagrees at a judged position and
+ *        lies further from llama.cpp than the image.
+ */
+LPL_TEST(the_verdicts_are_those_their_rules_give)
+{
+    lpl::convert::SequenceAgreement agreeing;
+    agreeing.imageMatchesForward = true;
+    agreeing.positions = {
+        {5u, 5u, 2.0, 0.5 },
+        {7u, 8u, 0.5, 0.75}
+    };
+    lpl::convert::SequenceAgreement disagreeing = agreeing;
+    disagreeing.positions.push_back({3u, 4u, 1.0, 6.0});
+    lpl::convert::SequenceAgreement unjudged = agreeing;
+    unjudged.positions = {
+        {7u, 8u, 0.5, 0.25}
+    };
+    lpl::convert::SequenceAgreement unforwarded = agreeing;
+    unforwarded.imageMatchesForward = false;
+    lpl::convert::SequenceAgreement unrun;
+    unrun.imageMatchesForward = true;
+
+    test.check(lpl::convert::agreesAtEveryJudgedPosition({agreeing, agreeing}),
+               "two sequences agreeing at their judged position agree, an unjudged disagreement aside");
+    test.check(!lpl::convert::agreesAtEveryJudgedPosition({}), "no sequence is no agreement");
+    test.check(!lpl::convert::agreesAtEveryJudgedPosition({agreeing, disagreeing}),
+               "a disagreement at a margin of exactly 1.0 is judged, and refuses it");
+    test.check(!lpl::convert::agreesAtEveryJudgedPosition({unjudged}), "no judged position at all refuses it");
+    test.check(!lpl::convert::agreesAtEveryJudgedPosition({agreeing, unforwarded}),
+               "logits that are not forward's refuse it");
+    test.check(!lpl::convert::agreesAtEveryJudgedPosition({agreeing, unrun}),
+               "and so does a sequence that did not run");
+
+    test.check(lpl::convert::controlFails({disagreeing}, {agreeing}),
+               "a control disagreeing at a judged position, 6.0 from llama.cpp where the image is 0.75, fails");
+    test.check(!lpl::convert::controlFails({agreeing}, {agreeing}), "a control that agrees does not");
+    test.check(!lpl::convert::controlFails({disagreeing}, {disagreeing, agreeing}),
+               "nor one no further from llama.cpp than the image");
 }

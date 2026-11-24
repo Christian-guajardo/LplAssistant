@@ -17,14 +17,20 @@ namespace lpl::convert {
 
 namespace {
 
-constexpr std::size_t kArenaSlack = 1u << 20;  ///< Room an arena keeps past what a run claims.
-constexpr const char *kLayerOutput = "l_out-"; ///< The name llama.cpp gives each layer's output.
-constexpr double kFixedUnits = 65536.0;        ///< Units of Q16.16 in 1.
+constexpr std::size_t kArenaSlack = 1u << 20;         ///< Room an arena keeps past what a run claims.
+constexpr const char *kLayerOutput = "l_out-";        ///< The name llama.cpp gives each layer's output.
+constexpr const char *kFeedForwardInput = "ffn_inp-"; ///< And the residual stream after each layer's attention.
+constexpr double kFixedUnits = 65536.0;               ///< Units of Q16.16 in 1.
 
 /**
- * @brief Discards llama.cpp's log lines, so that a test's or a tool's own records are all that is printed.
+ * @brief Passes llama.cpp's errors to the standard error, and discards its other lines, so that a test's or a tool's
+ *        own records are all the standard output holds and a refusal to load keeps its cause.
  */
-void silence(ggml_log_level, const char *, void *) {}
+void keepErrors(ggml_log_level level, const char *text, void *)
+{
+    if (level == GGML_LOG_LEVEL_ERROR)
+        std::fputs(text, stderr);
+}
 
 /**
  * @brief Initialises llama.cpp's backend once for the process.
@@ -33,18 +39,27 @@ void initialiseBackendOnce()
 {
     static std::once_flag once;
     std::call_once(once, [] {
-        llama_log_set(silence, nullptr);
+        llama_log_set(keepErrors, nullptr);
         llama_backend_init();
     });
 }
 
 /**
- * @brief Keeps the largest |value| of each layer's output llama.cpp computes, in the double @p peak points at.
+ * @brief Whether @p name begins with @p prefix.
+ */
+[[nodiscard]] bool startsWith(const char *name, const char *prefix)
+{
+    return std::strncmp(name, prefix, std::strlen(prefix)) == 0;
+}
+
+/**
+ * @brief Keeps the largest |value| of the residual stream llama.cpp computes, after each layer's attention and after
+ *        its feed-forward, where lpl::infer's is observed too, in the double @p peak points at.
  */
 bool observeLayerOutput(ggml_tensor *tensor, bool ask, void *peak)
 {
     if (ask)
-        return std::strncmp(tensor->name, kLayerOutput, std::strlen(kLayerOutput)) == 0;
+        return startsWith(tensor->name, kLayerOutput) || startsWith(tensor->name, kFeedForwardInput);
     if (tensor->type != GGML_TYPE_F32 || !ggml_is_contiguous(tensor))
         return true;
     const float *const values = static_cast<const float *>(tensor->data);
@@ -184,6 +199,20 @@ struct ImageRun {
     return 2u * cache + 2u * buffers + kArenaSlack;
 }
 
+/**
+ * @brief The largest |difference| of a logit over every position of @p sequences.
+ */
+[[nodiscard]] double largestLogitDifferenceOf(const std::vector<SequenceAgreement> &sequences) noexcept
+{
+    double largest = 0.0;
+    for (const SequenceAgreement &sequence : sequences)
+    {
+        for (const PositionAgreement &position : sequence.positions)
+            largest = std::max(largest, position.largestLogitDifference);
+    }
+    return largest;
+}
+
 } // namespace
 
 /**
@@ -238,6 +267,8 @@ std::optional<Refusal> ReferenceModel::open(const std::string &path, std::uint32
 bool ReferenceModel::run(const std::vector<std::uint32_t> &tokens, std::vector<float> &logits, double &residualPeak)
 {
     const std::uint32_t count = static_cast<std::uint32_t>(tokens.size());
+    if (count == 0u)
+        return false;
     llama_context_params parameters = llama_context_default_params();
     parameters.n_ctx = count;
     parameters.n_batch = count;
@@ -251,7 +282,7 @@ bool ReferenceModel::run(const std::vector<std::uint32_t> &tokens, std::vector<f
     residualPeak = 0.0;
 
     llama_context *const context = llama_new_context_with_model(_loaded->model, parameters);
-    if (context == nullptr || count == 0u)
+    if (context == nullptr)
         return false;
     llama_batch batch = llama_batch_init(static_cast<std::int32_t>(count), 0, 1);
     for (std::uint32_t i = 0u; i < count; ++i)
@@ -357,6 +388,26 @@ bool compareSequence(ReferenceModel &reference, const infer::Model &model, const
         out.positions.push_back(agreement);
     }
     return true;
+}
+
+bool agreesAtEveryJudgedPosition(const std::vector<SequenceAgreement> &sequences) noexcept
+{
+    std::uint32_t judged = 0u;
+    for (const SequenceAgreement &sequence : sequences)
+    {
+        if (sequence.positions.empty() || !sequence.imageMatchesForward || sequence.judgedDisagreements() != 0u)
+            return false;
+        judged += sequence.judged();
+    }
+    return judged != 0u;
+}
+
+bool controlFails(const std::vector<SequenceAgreement> &control, const std::vector<SequenceAgreement> &image) noexcept
+{
+    std::uint32_t disagreements = 0u;
+    for (const SequenceAgreement &sequence : control)
+        disagreements += sequence.judgedDisagreements();
+    return disagreements != 0u && largestLogitDifferenceOf(control) > largestLogitDifferenceOf(image);
 }
 
 bool assembleControl(const infer::Model &image, Control control, double base, ControlModel &out)

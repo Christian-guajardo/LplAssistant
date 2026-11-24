@@ -7,12 +7,15 @@
 
 #include <openssl/evp.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,15 +35,18 @@ constexpr const char *kHelp =
 
 Usage:
   lpl-convert convert <model.gguf> <image.lplmind> --context <positions> [--alignment-log2 <12..22>]
-  lpl-convert agree <model.gguf> <image.lplmind> [--threads <count>]
+  lpl-convert agree <model.gguf> <image.lplmind> [--threads <count>] [--positions]
   lpl-convert --help
 
+Both commands read the GGUF through ggml b3775's gguf parser, which stops the process on some malformed files rather
+than refusing them: give them a GGUF of a chain you trust, such as tools/gguf_reference.py's for SmolLM2.
+
 convert
-  Reads the GGUF through ggml's gguf API and refuses by name what ring 0's transformer does not execute: a key, a
-  tensor, a type, a token, a template or a value it does not know. Writes the image through lpl::infer's writeBlob,
-  reads it back, and refuses it when a slot lies past a relative root mean square of 2e-2 from its source tensor.
-  --context is required: it sizes the image's cache, 46080 bytes a position for SmolLM2-135M, and may not pass the
-  GGUF's own. The records, one per line:
+  Refuses by name what ring 0's transformer does not execute: a key, a tensor, a type, a token, a template or a value
+  it does not know, a key written twice. Writes the image through lpl::infer's writeBlob, reads it back, and refuses
+  it when a slot lies past a relative root mean square of 2e-2 from its source tensor. The names of the refusals are
+  those convert/include/lpl/convert/Converter.hpp and ModelFile.hpp list. --context is required: it sizes the image's
+  cache, 46080 bytes a position for SmolLM2-135M, and may not pass the GGUF's own. The records, one per line:
     input path=<file> bytes=<count> sha256=<hex>
     tensor name=<tensor> type=<type> rows=<count> columns=<count> relative_rms=<error> largest_error=<error>
            worst_block=<block>
@@ -53,15 +59,25 @@ convert
 agree
   Runs the image in lpl::infer and the GGUF in llama.cpp b3775 on the same ids: SmolLM2-135M-Instruct's 18 prompts and
   6 chat turns of tests/infer/fixtures/smollm2_byte_pairs.hpp, and the 18 prompts' ids three times over, 1248
-  positions. A position is judged when llama.cpp's first logit leads its second by at least 1.0. Then runs two
-  controls assembled from the image's own parts, its keys and values swapped and its rotary table of base 10000,
-  which must each disagree at a judged position. The records:
+  positions, which the image's context must hold. A position is judged when llama.cpp's first logit leads its second
+  by at least 1.0. Then runs, on the 24 short sequences, two controls assembled from the image's own parts, its keys
+  and values swapped and its rotary table of base 10000, which must each disagree at a judged position and lie
+  further from llama.cpp than the image. The records, one per line:
+    settings threads=<count> margin=<logits> keys=f32 values=f16 decode=one_per_sequence
     tokens kind=<prompt|turn> index=<i> ours=<match|differ> llama_cpp=<match|differ>
     sequence kind=<prompt|turn|long> index=<i> positions=<n> judged=<n> disagreements=<n> agreements=<n>
              last_judged=<0|1> last_agrees=<0|1> largest_logit_difference=<x> reference_residual_peak=<x>
              image_residual_peak=<x> image_saturations=<n> forward_matches=<0|1>
-    total ... ; control name=<name> judged=<n> disagreements=<n> largest_logit_difference=<x>
+      or, for a sequence an engine could not run: sequence kind=<kind> index=<i> ran=0
+    position kind=<kind> index=<i> at=<position> image_token=<id> reference_token=<id> margin=<logits>
+             largest_logit_difference=<x>, with --positions only
+    total sequences=<n> positions=<n> judged=<n> disagreements=<n> agreements=<n> largest_logit_difference=<x>
+          reference_residual_peak=<x> image_residual_peak=<x> image_saturations=<n> forward_matches=<0|1>
+          tokens_match=<0|1>
+    control name=<key_value_swapped|rotary_base_10000> judged=<n> disagreements=<n> largest_logit_difference=<x>
+      or, when its parts cannot be assembled: control name=<name> assembled=0
     verdict agrees=<0|1> controls_fail=<0|1>
+  or, when refused before any sequence, one record: refused name=<name> detail=<what it refuses>
 
 Exit status: 0 converted, or agreeing with both controls failing; 1 refused, or not; 2 a usage error.
 )";
@@ -108,15 +124,40 @@ Exit status: 0 converted, or agreeing with both controls failing; 1 refused, or 
 }
 
 /**
- * @brief @p text as a positive count, or 0 when it is not one.
+ * @brief Whether @p arguments hold the flag @p name.
  */
-[[nodiscard]] std::uint32_t countOf(const char *text)
+[[nodiscard]] bool flagOf(const std::vector<std::string> &arguments, const char *name)
 {
-    if (text == nullptr)
-        return 0u;
+    return std::find(arguments.begin(), arguments.end(), name) != arguments.end();
+}
+
+/**
+ * @brief @p text as a count of 32 bits, or nothing when it is not one.
+ */
+[[nodiscard]] std::optional<std::uint32_t> countOf(const char *text)
+{
     char *end = nullptr;
+    errno = 0;
     const unsigned long value = std::strtoul(text, &end, 10);
-    return end != text && *end == '\0' && value <= 0xFFFFFFFFul ? static_cast<std::uint32_t>(value) : 0u;
+    if (end == text || *end != '\0' || errno != 0 || value > 0xFFFFFFFFul || text[0] == '-')
+        return std::nullopt;
+    return static_cast<std::uint32_t>(value);
+}
+
+/**
+ * @brief The count option @p name gives, @p fallback when it is not given; prints the usage error and gives nothing
+ *        when it is given but is not a count.
+ */
+[[nodiscard]] std::optional<std::uint32_t> countOption(const std::vector<std::string> &arguments, const char *name,
+                                                       std::uint32_t fallback)
+{
+    const char *const text = optionOf(arguments, name);
+    if (text == nullptr)
+        return fallback;
+    const std::optional<std::uint32_t> count = countOf(text);
+    if (!count.has_value())
+        std::fprintf(stderr, "lpl-convert: %s %s is not a count; see --help\n", name, text);
+    return count;
 }
 
 /**
@@ -141,20 +182,28 @@ int printRefusal(const lpl::convert::Refusal &refusal)
 }
 
 /**
- * @brief Reads the file at @p path whole into @p bytes, whose storage is aligned for Model::view.
+ * @brief Reads the image at @p path whole into @p bytes, whose storage is aligned for Model::view.
+ * @return Nothing when read; `file_missing` when no file is there, `file_unreadable` when it cannot be read.
  */
-[[nodiscard]] bool readImage(const std::string &path, std::vector<std::uint8_t> &bytes)
+[[nodiscard]] std::optional<lpl::convert::Refusal> readImage(const std::string &path, std::vector<std::uint8_t> &bytes)
 {
+    struct stat status {};
+    if (stat(path.c_str(), &status) != 0)
+        return lpl::convert::Refusal{errno == ENOENT ? "file_missing" : "file_unreadable",
+                                     path + ": " + std::strerror(errno)};
     std::FILE *const file = std::fopen(path.c_str(), "rb");
-    if (file == nullptr)
-        return false;
-    std::fseek(file, 0, SEEK_END);
-    const long size = std::ftell(file);
-    std::fseek(file, 0, SEEK_SET);
-    bytes.resize(size > 0 ? static_cast<std::size_t>(size) : 0u);
-    const bool read = size > 0 && std::fread(bytes.data(), 1u, bytes.size(), file) == bytes.size();
+    if (!S_ISREG(status.st_mode) || status.st_size == 0 || file == nullptr)
+    {
+        if (file != nullptr)
+            std::fclose(file);
+        return lpl::convert::Refusal{"file_unreadable", path + ": not a regular file of at least one byte"};
+    }
+    bytes.resize(static_cast<std::size_t>(status.st_size));
+    const bool read = std::fread(bytes.data(), 1u, bytes.size(), file) == bytes.size();
     std::fclose(file);
-    return read;
+    if (!read)
+        return lpl::convert::Refusal{"file_unreadable", path + ": it cannot be read whole"};
+    return std::nullopt;
 }
 
 /**
@@ -175,18 +224,23 @@ void printTensors(const lpl::convert::Conversion &conversion)
  */
 int convert(const std::vector<std::string> &arguments)
 {
-    if (arguments.size() < 3u || optionOf(arguments, "--context") == nullptr)
+    const char *const context = optionOf(arguments, "--context");
+    if (arguments.size() < 3u || context == nullptr)
     {
         std::fputs("lpl-convert convert: needs <model.gguf> <image.lplmind> --context <positions>; see --help\n",
                    stderr);
         return kUsage;
     }
+    const std::optional<std::uint32_t> positions = countOption(arguments, "--context", 0u);
+    const std::optional<std::uint32_t> alignment =
+        countOption(arguments, "--alignment-log2", lpl::infer::kModelImageDefaultAlignmentLog2);
+    if (!positions.has_value() || !alignment.has_value())
+        return kUsage;
+
     const auto started = std::chrono::steady_clock::now();
     lpl::convert::ConversionOptions options;
-    options.contextLength = countOf(optionOf(arguments, "--context"));
-    if (const char *alignment = optionOf(arguments, "--alignment-log2"))
-        options.alignmentLog2 = countOf(alignment);
-
+    options.contextLength = *positions;
+    options.alignmentLog2 = *alignment;
     lpl::convert::ModelFile file;
     if (std::optional<lpl::convert::Refusal> refusal = file.open(arguments[1]))
         return printRefusal(*refusal);
@@ -231,28 +285,39 @@ struct Sequence {
 }
 
 /**
- * @brief The sequences of SmolLM2's fixture: each prompt's ids, each turn's, and the prompts' ids three times over.
+ * @brief The short sequences of SmolLM2's fixture: each prompt's ids, then each turn's.
  */
-[[nodiscard]] std::vector<Sequence> fixtureSequences()
+[[nodiscard]] std::vector<Sequence> shortSequences()
 {
     std::vector<Sequence> sequences;
-    std::vector<std::uint32_t> prompts;
     for (std::uint32_t i = 0u; i < smollm2_byte_pairs::kPromptCount; ++i)
     {
         const smollm2_byte_pairs::Prompt &prompt = smollm2_byte_pairs::kPrompts[i];
         sequences.push_back({"prompt", i, idsOf(smollm2_byte_pairs::kReferenceIds, prompt.firstId, prompt.idCount)});
-        prompts.insert(prompts.end(), sequences.back().tokens.begin(), sequences.back().tokens.end());
     }
     for (std::uint32_t i = 0u; i < smollm2_byte_pairs::kChatPairCount; ++i)
     {
         const smollm2_byte_pairs::ChatPair &pair = smollm2_byte_pairs::kChatPairs[i];
         sequences.push_back({"turn", i, idsOf(smollm2_byte_pairs::kChatTurnIds, pair.firstTurnId, pair.turnIdCount)});
     }
-    std::vector<std::uint32_t> repeated;
-    for (std::uint32_t r = 0u; r < kLongRepeats; ++r)
-        repeated.insert(repeated.end(), prompts.begin(), prompts.end());
-    sequences.push_back({"long", 0u, repeated});
     return sequences;
+}
+
+/**
+ * @brief The long sequence: the prompts' ids, one prompt after the other, kLongRepeats times over.
+ */
+[[nodiscard]] Sequence longSequence(const std::vector<Sequence> &shorter)
+{
+    Sequence repeated{"long", 0u, {}};
+    for (std::uint32_t r = 0u; r < kLongRepeats; ++r)
+    {
+        for (const Sequence &sequence : shorter)
+        {
+            if (std::strcmp(sequence.kind, "prompt") == 0)
+                repeated.tokens.insert(repeated.tokens.end(), sequence.tokens.begin(), sequence.tokens.end());
+        }
+    }
+    return repeated;
 }
 
 /**
@@ -314,91 +379,103 @@ struct Sequence {
 }
 
 /**
- * @struct Totals
- * @brief The sum of what the sequences found.
+ * @brief The largest |difference| of a logit over @p agreement's positions.
  */
-struct Totals {
-    std::uint32_t sequences{0u};        ///< Sequences run.
-    std::uint64_t positions{0u};        ///< Positions run.
-    std::uint64_t judged{0u};           ///< Positions judged.
-    std::uint64_t disagreements{0u};    ///< Judged positions that disagree.
-    std::uint64_t agreements{0u};       ///< Positions, judged or not, that agree.
-    double largestLogitDifference{0.0}; ///< Over every position.
-    double referenceResidualPeak{0.0};  ///< llama.cpp's.
-    double imageResidualPeak{0.0};      ///< lpl::infer's.
-    std::uint64_t imageSaturations{0u}; ///< lpl::infer's.
-    bool ran{true};                     ///< Every sequence ran.
-    bool forwardMatches{true};          ///< Every sequence's layer-by-layer logits were Transformer::forward's.
-};
-
-/**
- * @brief Adds @p agreement to @p totals.
- */
-void add(Totals &totals, const lpl::convert::SequenceAgreement &agreement)
+[[nodiscard]] double largestDifferenceOf(const lpl::convert::SequenceAgreement &agreement)
 {
-    ++totals.sequences;
-    totals.positions += agreement.positions.size();
-    totals.judged += agreement.judged();
-    totals.disagreements += agreement.judgedDisagreements();
-    totals.agreements += agreement.agreements();
-    for (const lpl::convert::PositionAgreement &position : agreement.positions)
-        totals.largestLogitDifference = std::max(totals.largestLogitDifference, position.largestLogitDifference);
-    totals.referenceResidualPeak = std::max(totals.referenceResidualPeak, agreement.referenceResidualPeak);
-    totals.imageResidualPeak = std::max(totals.imageResidualPeak, agreement.imageResidualPeak);
-    totals.imageSaturations += agreement.imageSaturations;
-    totals.forwardMatches = totals.forwardMatches && agreement.imageMatchesForward;
-}
-
-/**
- * @brief Prints the record of @p sequence's @p agreement.
- */
-void printSequence(const Sequence &sequence, const lpl::convert::SequenceAgreement &agreement)
-{
-    const lpl::convert::PositionAgreement &last = agreement.positions.back();
     double largest = 0.0;
     for (const lpl::convert::PositionAgreement &position : agreement.positions)
         largest = std::max(largest, position.largestLogitDifference);
+    return largest;
+}
+
+/**
+ * @brief Prints the record of @p sequence's @p agreement, and one per position when @p positions.
+ */
+void printSequence(const Sequence &sequence, const lpl::convert::SequenceAgreement &agreement, bool positions)
+{
+    const lpl::convert::PositionAgreement &last = agreement.positions.back();
     std::printf("sequence kind=%s index=%u positions=%zu judged=%u disagreements=%u agreements=%u last_judged=%d "
                 "last_agrees=%d largest_logit_difference=%.4f reference_residual_peak=%.1f image_residual_peak=%.1f "
                 "image_saturations=%llu forward_matches=%d\n",
                 sequence.kind, sequence.index, agreement.positions.size(), agreement.judged(),
                 agreement.judgedDisagreements(), agreement.agreements(),
                 last.referenceMargin >= lpl::convert::kAgreementMargin ? 1 : 0,
-                last.imageToken == last.referenceToken ? 1 : 0, largest, agreement.referenceResidualPeak,
-                agreement.imageResidualPeak, static_cast<unsigned long long>(agreement.imageSaturations),
-                agreement.imageMatchesForward ? 1 : 0);
+                last.imageToken == last.referenceToken ? 1 : 0, largestDifferenceOf(agreement),
+                agreement.referenceResidualPeak, agreement.imageResidualPeak,
+                static_cast<unsigned long long>(agreement.imageSaturations), agreement.imageMatchesForward ? 1 : 0);
+    for (std::size_t at = 0u; positions && at < agreement.positions.size(); ++at)
+    {
+        const lpl::convert::PositionAgreement &position = agreement.positions[at];
+        std::printf("position kind=%s index=%u at=%zu image_token=%u reference_token=%u margin=%.4f "
+                    "largest_logit_difference=%.4f\n",
+                    sequence.kind, sequence.index, at, position.imageToken, position.referenceToken,
+                    position.referenceMargin, position.largestLogitDifference);
+    }
     std::fflush(stdout);
 }
 
 /**
  * @brief Runs every sequence through @p model and @p reference, printing a record for each when @p print.
+ * @return One comparison per sequence; one without positions for a sequence an engine could not run.
  */
-[[nodiscard]] Totals runSequences(lpl::convert::ReferenceModel &reference, const lpl::infer::Model &model,
-                                  const std::vector<Sequence> &sequences, bool print)
+[[nodiscard]] std::vector<lpl::convert::SequenceAgreement> runSequences(lpl::convert::ReferenceModel &reference,
+                                                                        const lpl::infer::Model &model,
+                                                                        const std::vector<Sequence> &sequences,
+                                                                        bool print, bool positions)
 {
-    Totals totals;
+    std::vector<lpl::convert::SequenceAgreement> agreements;
     for (const Sequence &sequence : sequences)
     {
         lpl::convert::SequenceAgreement agreement;
         if (!lpl::convert::compareSequence(reference, model, sequence.tokens, agreement))
         {
-            totals.ran = false;
+            agreement.positions.clear();
             std::printf("sequence kind=%s index=%u ran=0\n", sequence.kind, sequence.index);
-            continue;
         }
-        add(totals, agreement);
-        if (print)
-            printSequence(sequence, agreement);
+        else if (print)
+            printSequence(sequence, agreement, positions);
+        agreements.push_back(std::move(agreement));
     }
-    return totals;
+    return agreements;
+}
+
+/**
+ * @brief Prints the total of @p agreements.
+ */
+void printTotal(const std::vector<lpl::convert::SequenceAgreement> &agreements, bool tokens)
+{
+    std::uint64_t positions = 0u, judged = 0u, disagreements = 0u, matching = 0u, saturations = 0u;
+    double largest = 0.0, referencePeak = 0.0, imagePeak = 0.0;
+    bool forward = true;
+    for (const lpl::convert::SequenceAgreement &agreement : agreements)
+    {
+        positions += agreement.positions.size();
+        judged += agreement.judged();
+        disagreements += agreement.judgedDisagreements();
+        matching += agreement.agreements();
+        saturations += agreement.imageSaturations;
+        largest = std::max(largest, largestDifferenceOf(agreement));
+        referencePeak = std::max(referencePeak, agreement.referenceResidualPeak);
+        imagePeak = std::max(imagePeak, agreement.imageResidualPeak);
+        forward = forward && agreement.imageMatchesForward;
+    }
+    std::printf("total sequences=%zu positions=%llu judged=%llu disagreements=%llu agreements=%llu "
+                "largest_logit_difference=%.4f reference_residual_peak=%.1f image_residual_peak=%.1f "
+                "image_saturations=%llu forward_matches=%d tokens_match=%d\n",
+                agreements.size(), static_cast<unsigned long long>(positions), static_cast<unsigned long long>(judged),
+                static_cast<unsigned long long>(disagreements), static_cast<unsigned long long>(matching), largest,
+                referencePeak, imagePeak, static_cast<unsigned long long>(saturations), forward ? 1 : 0,
+                tokens ? 1 : 0);
 }
 
 /**
  * @brief Runs control @p control of @p image on the short sequences, printing its record.
- * @return Whether it disagreed at a judged position, as a control must.
+ * @return Whether it fails as a control must, against @p imageShort, the image's comparisons on the same sequences.
  */
 [[nodiscard]] bool runControl(lpl::convert::ReferenceModel &reference, const lpl::infer::Model &image,
-                              lpl::convert::Control control, const char *name, const std::vector<Sequence> &sequences)
+                              lpl::convert::Control control, const char *name, const std::vector<Sequence> &shorter,
+                              const std::vector<lpl::convert::SequenceAgreement> &imageShort)
 {
     lpl::convert::ControlModel made;
     if (!lpl::convert::assembleControl(image, control, kControlBase, made))
@@ -406,12 +483,19 @@ void printSequence(const Sequence &sequence, const lpl::convert::SequenceAgreeme
         std::printf("control name=%s assembled=0\n", name);
         return false;
     }
-    std::vector<Sequence> shorter(sequences.begin(), sequences.end() - 1);
-    const Totals totals = runSequences(reference, made.model, shorter, false);
+    const std::vector<lpl::convert::SequenceAgreement> agreements =
+        runSequences(reference, made.model, shorter, false, false);
+    std::uint64_t judged = 0u, disagreements = 0u;
+    double largest = 0.0;
+    for (const lpl::convert::SequenceAgreement &agreement : agreements)
+    {
+        judged += agreement.judged();
+        disagreements += agreement.judgedDisagreements();
+        largest = std::max(largest, largestDifferenceOf(agreement));
+    }
     std::printf("control name=%s judged=%llu disagreements=%llu largest_logit_difference=%.4f\n", name,
-                static_cast<unsigned long long>(totals.judged), static_cast<unsigned long long>(totals.disagreements),
-                totals.largestLogitDifference);
-    return totals.ran && totals.disagreements > 0u;
+                static_cast<unsigned long long>(judged), static_cast<unsigned long long>(disagreements), largest);
+    return lpl::convert::controlFails(agreements, imageShort);
 }
 
 /**
@@ -424,14 +508,19 @@ int agree(const std::vector<std::string> &arguments)
         std::fputs("lpl-convert agree: needs <model.gguf> <image.lplmind>; see --help\n", stderr);
         return kUsage;
     }
-    const std::uint32_t threads =
-        optionOf(arguments, "--threads") != nullptr ? countOf(optionOf(arguments, "--threads")) : kDefaultThreads;
-    lpl::convert::ReferenceModel reference;
-    if (std::optional<lpl::convert::Refusal> refusal = reference.open(arguments[1], threads == 0u ? 1u : threads))
-        return printRefusal(*refusal);
+    const std::optional<std::uint32_t> threads = countOption(arguments, "--threads", kDefaultThreads);
+    if (!threads.has_value() || *threads == 0u)
+    {
+        if (threads.has_value())
+            std::fputs("lpl-convert: --threads 0 runs nothing; see --help\n", stderr);
+        return kUsage;
+    }
     std::vector<std::uint8_t> bytes;
-    if (!readImage(arguments[2], bytes))
-        return printRefusal(lpl::convert::Refusal{"file_unreadable", arguments[2] + ": the image cannot be read"});
+    if (std::optional<lpl::convert::Refusal> refusal = readImage(arguments[2], bytes))
+        return printRefusal(*refusal);
+    lpl::convert::ReferenceModel reference;
+    if (std::optional<lpl::convert::Refusal> refusal = reference.open(arguments[1], *threads))
+        return printRefusal(*refusal);
     lpl::infer::TensorArena arena{kTokenizerArenaBytes};
     lpl::infer::Model image;
     const lpl::infer::ModelReadReport read = image.view(arena, bytes.data(), static_cast<lpl::core::u32>(bytes.size()));
@@ -440,27 +529,27 @@ int agree(const std::vector<std::string> &arguments)
     if (image.config().vocabSize != reference.vocabularySize() || image.chatTokens().turnEnd != 2u)
         return printRefusal(
             lpl::convert::Refusal{"sequences_not_this_model", "the sequences are SmolLM2-135M-Instruct's ids"});
+    const std::vector<Sequence> shorter = shortSequences();
+    std::vector<Sequence> sequences = shorter;
+    sequences.push_back(longSequence(shorter));
+    if (image.config().contextLength < sequences.back().tokens.size())
+        return printRefusal(lpl::convert::Refusal{"image_context_too_short",
+                                                  "the image holds " + std::to_string(image.config().contextLength) +
+                                                      " positions, and the long sequence " +
+                                                      std::to_string(sequences.back().tokens.size())});
 
     std::printf("settings threads=%u margin=%.1f keys=f32 values=f16 decode=one_per_sequence\n", reference.threads(),
                 lpl::convert::kAgreementMargin);
     const bool tokens = checkTokens(image, reference);
-    const std::vector<Sequence> sequences = fixtureSequences();
-    const Totals totals = runSequences(reference, image, sequences, true);
-    std::printf("total sequences=%u positions=%llu judged=%llu disagreements=%llu agreements=%llu "
-                "largest_logit_difference=%.4f reference_residual_peak=%.1f image_residual_peak=%.1f "
-                "image_saturations=%llu forward_matches=%d tokens_match=%d\n",
-                totals.sequences, static_cast<unsigned long long>(totals.positions),
-                static_cast<unsigned long long>(totals.judged), static_cast<unsigned long long>(totals.disagreements),
-                static_cast<unsigned long long>(totals.agreements), totals.largestLogitDifference,
-                totals.referenceResidualPeak, totals.imageResidualPeak,
-                static_cast<unsigned long long>(totals.imageSaturations), totals.forwardMatches ? 1 : 0,
-                tokens ? 1 : 0);
+    const std::vector<lpl::convert::SequenceAgreement> agreements =
+        runSequences(reference, image, sequences, true, flagOf(arguments, "--positions"));
+    printTotal(agreements, tokens);
+    const std::vector<lpl::convert::SequenceAgreement> imageShort(agreements.begin(), agreements.end() - 1);
     const bool swapped =
-        runControl(reference, image, lpl::convert::Control::KeyValueSwapped, "key_value_swapped", sequences);
+        runControl(reference, image, lpl::convert::Control::KeyValueSwapped, "key_value_swapped", shorter, imageShort);
     const bool rotated =
-        runControl(reference, image, lpl::convert::Control::RotaryBase, "rotary_base_10000", sequences);
-    const bool agrees =
-        totals.ran && totals.forwardMatches && tokens && totals.judged > 0u && totals.disagreements == 0u;
+        runControl(reference, image, lpl::convert::Control::RotaryBase, "rotary_base_10000", shorter, imageShort);
+    const bool agrees = tokens && lpl::convert::agreesAtEveryJudgedPosition(agreements);
     std::printf("verdict agrees=%d controls_fail=%d\n", agrees ? 1 : 0, swapped && rotated ? 1 : 0);
     return agrees && swapped && rotated ? kDone : kRefused;
 }
