@@ -32,5 +32,5 @@ target("lpl-infer")
 
     add_includedirs("include", { public = true })
     add_files("src/**.cpp")
-    add_headerfiles("include/(lpl/infer/**.hpp)")
+    add_headerfiles("include/(lpl/infer/**.hpp)", "include/(lpl/infer/**.inl)")
 target_end()

@@ -108,7 +108,7 @@ public:
      * @brief The key run of one slot.
      * @param layer Block index.
      * @param slot  Slot index below @ref length.
-     * @return The run, of @c dim values.
+     * @return The run, of ModelConfig::keyValueWidth() values.
      */
     [[nodiscard]] VectorView key(core::u32 layer, core::u32 slot) const noexcept;
 
@@ -116,14 +116,14 @@ public:
      * @brief The value run of one slot.
      * @param layer Block index.
      * @param slot  Slot index below @ref length.
-     * @return The run, of @c dim values.
+     * @return The run, of ModelConfig::keyValueWidth() values.
      */
     [[nodiscard]] VectorView value(core::u32 layer, core::u32 slot) const noexcept;
 
 private:
     math::Fixed32 *_keys{nullptr};
     math::Fixed32 *_values{nullptr};
-    core::u32 _dim{0u};
+    core::u32 _width{0u};
     core::u32 _layers{0u};
     core::u32 _capacity{0u};
     core::u32 _length{0u};

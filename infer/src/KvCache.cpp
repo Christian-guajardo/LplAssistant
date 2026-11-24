@@ -18,7 +18,7 @@ bool KvCache::allocate(TensorArena &arena, const ModelConfig &shape, CachePolicy
     if (!shape.valid())
         return false;
 
-    const core::usize entries = static_cast<core::usize>(shape.layers) * shape.contextLength * shape.dim;
+    const core::usize entries = static_cast<core::usize>(shape.layers) * shape.contextLength * shape.keyValueWidth();
     math::Fixed32 *const keys = arena.claim<math::Fixed32>(entries);
     math::Fixed32 *const values = arena.claim<math::Fixed32>(entries);
     if (keys == nullptr || values == nullptr)
@@ -26,7 +26,7 @@ bool KvCache::allocate(TensorArena &arena, const ModelConfig &shape, CachePolicy
 
     _keys = keys;
     _values = values;
-    _dim = shape.dim;
+    _width = shape.keyValueWidth();
     _layers = shape.layers;
     _capacity = shape.contextLength;
     _length = 0u;
@@ -51,13 +51,13 @@ core::u32 KvCache::reserve() noexcept
     // documentation gives: a slot's index has to keep meaning its position.
     for (core::u32 l = 0u; l < _layers; ++l)
     {
-        math::Fixed32 *const keyBase = _keys + static_cast<core::usize>(l) * _capacity * _dim;
-        math::Fixed32 *const valueBase = _values + static_cast<core::usize>(l) * _capacity * _dim;
+        math::Fixed32 *const keyBase = _keys + static_cast<core::usize>(l) * _capacity * _width;
+        math::Fixed32 *const valueBase = _values + static_cast<core::usize>(l) * _capacity * _width;
         for (core::u32 slot = 1u; slot < _capacity; ++slot)
-            for (core::u32 i = 0u; i < _dim; ++i)
+            for (core::u32 i = 0u; i < _width; ++i)
             {
-                keyBase[(slot - 1u) * _dim + i] = keyBase[slot * _dim + i];
-                valueBase[(slot - 1u) * _dim + i] = valueBase[slot * _dim + i];
+                keyBase[(slot - 1u) * _width + i] = keyBase[slot * _width + i];
+                valueBase[(slot - 1u) * _width + i] = valueBase[slot * _width + i];
             }
     }
 
@@ -68,13 +68,13 @@ core::u32 KvCache::reserve() noexcept
 VectorView KvCache::key(core::u32 layer, core::u32 slot) const noexcept
 {
     LPL_VERIFY(_keys != nullptr && layer < _layers && slot < _capacity);
-    return VectorView{_keys + (static_cast<core::usize>(layer) * _capacity + slot) * _dim, _dim};
+    return VectorView{_keys + (static_cast<core::usize>(layer) * _capacity + slot) * _width, _width};
 }
 
 VectorView KvCache::value(core::u32 layer, core::u32 slot) const noexcept
 {
     LPL_VERIFY(_values != nullptr && layer < _layers && slot < _capacity);
-    return VectorView{_values + (static_cast<core::usize>(layer) * _capacity + slot) * _dim, _dim};
+    return VectorView{_values + (static_cast<core::usize>(layer) * _capacity + slot) * _width, _width};
 }
 
 } // namespace lpl::infer

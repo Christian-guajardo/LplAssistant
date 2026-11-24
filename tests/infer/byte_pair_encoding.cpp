@@ -1,4 +1,5 @@
 #include "fixtures/smollm2_byte_pairs.hpp"
+#include "model_image_writer.hpp"
 
 #include <lpl/infer/Model.hpp>
 #include <lpl/infer/ModelImage.hpp>
@@ -173,20 +174,6 @@ void markUnspellableBytes(const lpl::infer::Vocab &vocab, bool *out)
 {
     state = state * kLinearCongruentialMultiplier + kLinearCongruentialIncrement;
     return static_cast<char>(state >> kDrawShift);
-}
-
-/**
- * @brief Writes @p model's image into @p arena.
- * @return The image, or nullptr when the writer refused or the arena is short; @p size receives its bytes.
- */
-[[nodiscard]] lpl::core::u8 *writeImage(lpl::infer::TensorArena &arena, const lpl::infer::Model &model,
-                                        lpl::core::u32 &size)
-{
-    size = model.blobBytes();
-    lpl::core::u32 *const words = size != 0u ? arena.claim<lpl::core::u32>(size / 4u + 1u) : nullptr;
-    lpl::core::u8 *const image = reinterpret_cast<lpl::core::u8 *>(words);
-
-    return image != nullptr && model.writeBlob(image, size) == size ? image : nullptr;
 }
 
 /**
@@ -745,7 +732,10 @@ LPL_TEST(an_image_carries_its_merges_and_pre_tokenizer)
     const bool synthesised = fixture.bound && model.synthesise(arena, shape, fixture.vocab, fixture.merges,
                                                                lpl::infer::PreTokenizer::IndividualDigitsThenByteLevel,
                                                                lpl::infer::parityModelSeed());
-    lpl::core::u8 *const image = synthesised ? writeImage(arena, model, size) : nullptr;
+    lpl::core::u8 *const image =
+        synthesised ?
+            lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size) :
+            nullptr;
     if (!test.check(image != nullptr, "a model over the fixture's tables writes its image"))
         return;
 
@@ -803,7 +793,10 @@ LPL_TEST(an_image_whose_merges_or_pre_tokenizer_do_not_hold_is_refused)
     const bool synthesised = fixture.bound && model.synthesise(arena, shape, fixture.vocab, fixture.merges,
                                                                lpl::infer::PreTokenizer::IndividualDigitsThenByteLevel,
                                                                lpl::infer::parityModelSeed());
-    lpl::core::u8 *const image = synthesised ? writeImage(arena, model, size) : nullptr;
+    lpl::core::u8 *const image =
+        synthesised ?
+            lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size) :
+            nullptr;
     if (!test.check(image != nullptr, "a model over the fixture's tables writes its image"))
         return;
 

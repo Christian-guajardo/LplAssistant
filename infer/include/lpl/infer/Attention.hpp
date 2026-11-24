@@ -62,7 +62,7 @@ void rmsNorm(ConstVectorView input, ConstVectorView gain, core::u32 epsilon, Vec
  * has since slid to.
  *
  * @param vector      Query or key run, @c heads * headDim long.
- * @param heads       Attention heads.
+ * @param heads       Heads of @p vector: the query heads, or ModelConfig::keyValueHeads for a key.
  * @param headDim     Channels per head; pairs are (2i, 2i+1) within a head.
  * @param frequencies How far pair i turns per position; @c headDim / 2 entries.
  * @param position    Absolute position of the token.
@@ -83,7 +83,8 @@ void applyRotaryEmbedding(VectorView vector, core::u32 heads, core::u32 headDim,
 void softmaxInPlace(VectorView scores) noexcept;
 
 /**
- * @brief One block's attention, added into the residual stream.
+ * @brief One block's attention, added into the residual stream: query head h reads key and value head
+ *        h / ModelConfig::headsPerKeyValueHead().
  *
  * @param shape    The model's extents.
  * @param weights  This block's tensors.

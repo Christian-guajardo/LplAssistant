@@ -48,6 +48,7 @@ constexpr core::u32 kHeaderVocabText = 56u;
 constexpr core::u32 kHeaderNormEpsilon = 60u;
 constexpr core::u32 kHeaderMergeCount = 64u;
 constexpr core::u32 kHeaderPreTokenizer = 68u;
+constexpr core::u32 kHeaderKeyValueHeads = 72u;
 /** @} */
 
 /**
@@ -131,7 +132,8 @@ ModelSegment expectedSegment(const ModelConfig &shape, const ModelTokenizerExten
     {
         segment.role = ModelSegmentRole::Attention;
         segment.layer = index - 1u;
-        segment.length = 2u * dim * 4u + 4u * modelMatrixImageBytes(shape.dim, shape.dim);
+        segment.length = 2u * dim * 4u + 2u * modelMatrixImageBytes(shape.dim, shape.dim) +
+                         2u * modelMatrixImageBytes(shape.keyValueWidth(), shape.dim);
     }
     else if (index == shape.layers + 2u)
     {
@@ -194,6 +196,7 @@ ModelImageHeader readHeader(const core::u8 *bytes) noexcept
     header.shape.vocabSize = wordAt(bytes, kHeaderVocabSize);
     header.vocabTextBytes = wordAt(bytes, kHeaderVocabText);
     header.shape.normEpsilon = wordAt(bytes, kHeaderNormEpsilon);
+    header.shape.keyValueHeads = wordAt(bytes, kHeaderKeyValueHeads);
     header.mergeCount = wordAt(bytes, kHeaderMergeCount);
     header.preTokenizer = static_cast<PreTokenizer>(wordAt(bytes, kHeaderPreTokenizer));
     return header;
@@ -367,6 +370,7 @@ void writeModelImageHeader(core::u8 *image, const ModelImageHeader &header) noex
     putWordAt(image, kHeaderVocabSize, header.shape.vocabSize);
     putWordAt(image, kHeaderVocabText, header.vocabTextBytes);
     putWordAt(image, kHeaderNormEpsilon, header.shape.normEpsilon);
+    putWordAt(image, kHeaderKeyValueHeads, header.shape.keyValueHeads);
     putWordAt(image, kHeaderMergeCount, header.mergeCount);
     putWordAt(image, kHeaderPreTokenizer, static_cast<core::u32>(header.preTokenizer));
 }
