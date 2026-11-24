@@ -89,7 +89,8 @@ struct Conversion {
  *         `requantisation_past_bound`), the tokenizer (`tokenizer_unknown`, `pre_tokenizer_unknown`, `token_*`,
  *         `merges_*`, `merge_unresolved`, `chat_template_unknown`, `end_of_turn_disagrees`, `chat_tokens_missing`), the
  *         rotation (`rotary_*`), the shape (`architecture_unknown`, `shape_refused`, `context_missing`,
- *         `context_past_training`) or the image (`image_too_large`, `image_unreadable`).
+ *         `context_past_training`, `alignment_refused`) or the image (`image_too_large`); `image_self_check_failed`
+ *         when the image written does not read back as the model assembled, which no input is known to reach.
  */
 [[nodiscard]] Conversion convertModel(const SourceModel &source, const ConversionOptions &options);
 

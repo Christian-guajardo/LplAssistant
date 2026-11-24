@@ -243,9 +243,10 @@ public:
      *   them: ImageRefused, with BadShape, UnknownPreTokenizer or UnknownChatFormat;
      * - a missing part, or one whose rows, columns, count or pairs are not the shape's: PartsMisshapen;
      * - a vocabulary entry that is empty, longer than a token may be or past the text: VocabularyRefused;
+     * - an arena that cannot hold the vocabulary's index: ArenaExhausted;
      * - a vocabulary that lacks a token its chat format needs: ChatTokensMissing;
-     * - merges that do not hold against the vocabulary: MergesRefused;
-     * - an arena that cannot hold an index: ArenaExhausted.
+     * - merges that do not hold against the vocabulary: MergesRefused, or ArenaExhausted for an arena that cannot hold
+     *   their index.
      *
      * @param arena Storage for the indexes.
      * @param parts What the model is made of.

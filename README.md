@@ -67,8 +67,12 @@ G=~/.cache/lplassistant/gguf-reference/smollm2-135m-instruct-12fd25f-gguf/smollm
 ./build/linux/x86_64/release/lpl-convert agree $G smollm2.lplmind
 ```
 
-`lpl-convert --help` dit chaque commande, chaque enregistrement et chaque refus. Les tests du convertisseur,
-`xmake run test-convert`, tournent sur des modèles qu'ils construisent.
+`lpl-convert --help` dit chaque commande et chaque enregistrement ; les refus sont nommés dans
+`convert/include/lpl/convert/Converter.hpp` et `ModelFile.hpp`. Les deux commandes ne lisent qu'un GGUF d'une chaîne
+de confiance : le parseur de ggml b3775 arrête le processus sur certains fichiers malformés. `lpl-convert` se lie à la
+libcrypto d'OpenSSL, pour les SHA-256 qu'il imprime, et prend ses séquences de comparaison dans la fixture
+`tests/infer/fixtures/smollm2_byte_pairs.hpp`. Les tests du convertisseur, `xmake run test-convert`, tournent sur des
+modèles qu'ils construisent, et dans aucune CI de ce dépôt pour l'instant.
 
 ## Build autonome
 
