@@ -656,6 +656,14 @@ LPL_TEST(a_tokenizer_that_does_not_hold_is_refused_by_name)
     {
         lpl::convert::tests::SyntheticModel model(lpl::convert::tests::SyntheticWeights::Float32);
         std::vector<std::string> tokens = tokensOf(model);
+        tokens[0] = "<|end of text|>";
+        model.set("tokenizer.ggml.tokens", textList(tokens));
+        test.check(outcomeOf(model) == "converted",
+                   "a CONTROL token holding a raw space converts: its text is taken as it is, not decoded");
+    }
+    {
+        lpl::convert::tests::SyntheticModel model(lpl::convert::tests::SyntheticWeights::Float32);
+        std::vector<std::string> tokens = tokensOf(model);
         tokens[263] = tokens[3u + 'h'];
         model.set("tokenizer.ggml.tokens", textList(tokens));
         test.check(refusedAs(model, "token_repeated", "263"), "a token whose bytes another has is token_repeated");

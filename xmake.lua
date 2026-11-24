@@ -336,6 +336,18 @@ target("test-convert")
     add_syslinks("pthread")
 target_end()
 
+-- The GGUF converter, `lpl-convert --help`: it prints the SHA-256 of what it reads and writes through OpenSSL's
+-- libcrypto, the platform's, and its comparison takes its sequences from SmolLM2's tokenizer fixture.
+target("lpl-convert")
+    set_kind("binary")
+    set_group("apps")
+    set_default(false)
+    add_deps("lpl-converter", "lpl-foundation")
+    add_includedirs("tests")
+    add_files("apps/convert/main.cpp")
+    add_syslinks("crypto", "pthread")
+target_end()
+
 target("test-grammar-constraint")
     set_kind("binary")
     set_group("tests")
