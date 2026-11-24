@@ -5,12 +5,14 @@
  * The blob arrives as a multiboot module, exactly like the cartridge. Same slot
  * machinery, same validation, same refusal to silently substitute a fallback.
  *
- * Two ways to obtain one, and they answer different questions. @ref Model::open
+ * Three ways to obtain one, and they answer different questions. @ref Model::open
  * reads an image somebody baked, which is what a demon with a trained mind does.
  * @ref Model::synthesise derives every weight from a seed, which is what the parity
  * gate does — because a gate about ARITHMETIC must not depend on a file: shipping a
  * blob to both sides would prove the two targets can read the same bytes, not that
- * they compute the same forward pass from them.
+ * they compute the same forward pass from them. @ref Model::assemble borrows weights
+ * its caller holds, which is what a converter does before @ref Model::writeBlob writes
+ * them: the one writer of the layout stays one.
  *
  * The embedding table is quantised like every other matrix and is used twice: read
  * by row to embed a token, multiplied by to produce logits. Tied weights are the
@@ -60,6 +62,7 @@ enum class ModelReadVerdict : core::u32 {
     ArenaExhausted = 6u,    ///< The arena cannot hold what the reading claims.
     MergesRefused = 7u,     ///< A merge names a token past the vocabulary, is not the concatenation, or repeats a pair.
     ChatTokensMissing = 8u, ///< The vocabulary lacks a token its chat format needs: `<|im_start|>` or `<|im_end|>`.
+    PartsMisshapen = 9u,    ///< A part Model::assemble is given is not of the shape's extents, or is missing.
 };
 
 /**
@@ -90,7 +93,7 @@ inline constexpr core::u32 kModelViewAlignment = alignof(QuantBlock);
  * @brief The name a boot line gives a reading's verdict.
  * @param verdict A verdict.
  * @return "read", "misaligned", "big_endian_host", "image_refused", "signature_mismatch", "vocabulary_refused",
- *         "arena_exhausted", "merges_refused" or "chat_tokens_missing"; "unknown" otherwise.
+ *         "arena_exhausted", "merges_refused", "chat_tokens_missing" or "parts_misshapen"; "unknown" otherwise.
  */
 [[nodiscard]] const char *modelReadVerdictName(ModelReadVerdict verdict) noexcept;
 
@@ -170,6 +173,27 @@ struct LayerWeights {
 };
 
 /**
+ * @struct ModelParts
+ * @brief What a model is made of, held by whoever assembles it: Model::assemble borrows every part where it lies.
+ *
+ * A matrix's blocks are rows times quantBlockCount(columns) of them, which no check can see.
+ */
+struct ModelParts {
+    ModelConfig shape{};                                ///< The transformer's extents.
+    const char *vocabularyText{nullptr};                ///< The tokens' bytes, one after the other.
+    core::u32 vocabularyTextBytes{0u};                  ///< Bytes of the vocabulary's text.
+    const VocabEntry *vocabularyEntries{nullptr};       ///< shape.vocabSize entries, in identifier order.
+    const BytePairMerge *merges{nullptr};               ///< The merges in the order of their ranks; nullptr for none.
+    core::u32 mergeCount{0u};                           ///< Merges.
+    PreTokenizer preTokenizer{PreTokenizer::WholeText}; ///< How text splits before it is segmented.
+    ChatFormat chatFormat{ChatFormat::Plain};           ///< How messages are put in the model's turns.
+    QuantMatrixView embedding{};                        ///< vocabSize rows of dim columns.
+    const LayerWeights *layers{nullptr};                ///< shape.layers of them.
+    ConstVectorView finalNorm{};                        ///< dim gains.
+    RotaryFrequencies rotary{};                         ///< shape.rotaryPairs() entries.
+};
+
+/**
  * @class Model
  * @brief Weights, shape and vocabulary, all living in one arena.
  */
@@ -208,6 +232,27 @@ public:
      */
     bool synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab &vocab, const BytePairMerges &merges,
                     PreTokenizer preTokenizer, ChatFormat chatFormat, core::u32 seed);
+
+    /**
+     * @brief Makes a model over parts its caller holds, as @ref view makes one over an image's bytes, with the checks
+     *        reading an image runs.
+     *
+     * Every part is borrowed: it must outlive the model and must not change. @p arena holds the vocabulary's sorted
+     * index and the merges' index, nothing else. The refusals, in the order they are checked:
+     * - the shape, the vocabulary's text bytes, the pre-tokenizer and the chat format as an image's header would hold
+     *   them: ImageRefused, with BadShape, UnknownPreTokenizer or UnknownChatFormat;
+     * - a missing part, or one whose rows, columns, count or pairs are not the shape's: PartsMisshapen;
+     * - a vocabulary entry that is empty, longer than a token may be or past the text: VocabularyRefused;
+     * - a vocabulary that lacks a token its chat format needs: ChatTokensMissing;
+     * - merges that do not hold against the vocabulary: MergesRefused;
+     * - an arena that cannot hold an index: ArenaExhausted.
+     *
+     * @param arena Storage for the indexes.
+     * @param parts What the model is made of.
+     * @return Read; otherwise what was refused, the one-based entry the part would take in the model's image, and the
+     *         model is not ready.
+     */
+    [[nodiscard]] ModelReadReport assemble(TensorArena &arena, const ModelParts &parts);
 
     /**
      * @brief Reads a baked image into @p arena.
@@ -398,7 +443,7 @@ private:
     QuantMatrixView _embedding{};
     ConstVectorView _finalNorm{};
     RotaryFrequencies _rotary{};
-    LayerWeights *_layers{nullptr};
+    const LayerWeights *_layers{nullptr};
 };
 
 } // namespace lpl::infer
