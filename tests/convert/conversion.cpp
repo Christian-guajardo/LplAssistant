@@ -112,6 +112,47 @@ constexpr std::uint32_t kNormEpsilonUnits = 42950u; ///< round(float(1e-5) * 2^3
 }
 
 /**
+ * @brief The relative root mean square of the difference between @p matrix and tensor @p name of @p model, its row r
+ *        compared with the source's row @p sourceRow(r).
+ */
+template <typename SourceRow>
+[[nodiscard]] double distanceThrough(const lpl::infer::QuantMatrixView &matrix,
+                                     const lpl::convert::tests::SyntheticModel &model, const std::string &name,
+                                     SourceRow sourceRow)
+{
+    double squaredError = 0.0;
+    double squaredSource = 0.0;
+
+    for (std::uint32_t row = 0u; row < matrix.rows; ++row)
+    {
+        const lpl::infer::QuantBlock *const blocks = matrix.row(row);
+        for (std::uint32_t column = 0u; column < matrix.columns; ++column)
+        {
+            const lpl::infer::QuantBlock &block = blocks[column / lpl::infer::kQuantBlockLanes];
+            const double value = static_cast<double>(block.lanes[column % lpl::infer::kQuantBlockLanes]) *
+                                 static_cast<double>(block.scaleRaw) / 127.0 / 65536.0;
+            const double source =
+                model.drawn(name, static_cast<std::uint64_t>(sourceRow(row)) * matrix.columns + column);
+            squaredError += (value - source) * (value - source);
+            squaredSource += source * source;
+        }
+    }
+    return std::sqrt(squaredError / squaredSource);
+}
+
+/**
+ * @brief The row of a head of 64 channels whose pairs lie half a head apart that holds channel @p row of ring 0's
+ *        adjacent pairs: channel 2j + s takes channel 32 s + j, worked apart from the converter.
+ */
+[[nodiscard]] std::uint32_t halfSplitRowOf(std::uint32_t row)
+{
+    const std::uint32_t head = row / lpl::convert::tests::kSyntheticHeadDim;
+    const std::uint32_t channel = row % lpl::convert::tests::kSyntheticHeadDim;
+    return head * lpl::convert::tests::kSyntheticHeadDim +
+           (channel % 2u) * (lpl::convert::tests::kSyntheticHeadDim / 2u) + channel / 2u;
+}
+
+/**
  * @brief Whether @p matrix lies close to tensor @p own of @p model and far from tensor @p other.
  */
 [[nodiscard]] bool holds(const lpl::infer::QuantMatrixView &matrix, const lpl::convert::tests::SyntheticModel &model,
@@ -253,7 +294,71 @@ void checkConversion(lpl::testing::Test &test, lpl::convert::tests::SyntheticWei
     test.measure("image_bytes", static_cast<lpl::core::u32>(conversion.image.size()));
 }
 
+/**
+ * @brief The synthetic model as a `qwen2` GGUF would hold it, without biases: its keys under qwen2's prefix.
+ */
+void makeQwen2(lpl::convert::tests::SyntheticModel &model)
+{
+    std::vector<std::pair<std::string, lpl::convert::MetadataValue>> renamed;
+    for (const auto &[key, value] : model.source().metadata)
+    {
+        if (key.rfind("llama.", 0u) == 0u)
+            renamed.emplace_back("qwen2." + key.substr(6u), value);
+    }
+    for (const auto &[key, value] : renamed)
+    {
+        model.removeKey("llama." + key.substr(6u));
+        model.set(key, value);
+    }
+    model.set("general.architecture", lpl::convert::tests::text("qwen2"));
+}
+
 } // namespace
+
+/**
+ * @brief A model whose pairs lie half a head apart has its query and key rows brought to ring 0's adjacent pairs,
+ *        each head on its own, and every other matrix kept as it is.
+ */
+LPL_TEST(a_half_split_model_s_query_and_key_rows_alone_are_brought_to_adjacent_pairs)
+{
+    lpl::convert::tests::SyntheticModel model(lpl::convert::tests::SyntheticWeights::Float32);
+    makeQwen2(model);
+    const lpl::convert::Conversion conversion = lpl::convert::convertModel(model.source(), options());
+    test.check(!conversion.refusal.has_value() && conversion.architecture == "qwen2",
+               "a qwen2 model without biases converts");
+    if (conversion.image.empty())
+        return;
+
+    lpl::infer::TensorArena arena{kViewArenaBytes};
+    lpl::infer::Model view;
+    test.check(
+        view.view(arena, conversion.image.data(), static_cast<lpl::core::u32>(conversion.image.size())).verdict ==
+            lpl::infer::ModelReadVerdict::Read,
+        "and its image reads");
+    if (!view.ready())
+        return;
+    const auto inPlace = [](std::uint32_t row) { return row; };
+    bool paired = true;
+    bool kept = true;
+    for (std::uint32_t l = 0u; l < lpl::convert::tests::kSyntheticLayers; ++l)
+    {
+        const std::string block = "blk." + std::to_string(l) + ".";
+        const lpl::infer::LayerWeights &layer = view.layer(l);
+        paired = paired && distanceThrough(layer.query, model, block + "attn_q.weight", halfSplitRowOf) < kSlotBound &&
+                 distanceThrough(layer.query, model, block + "attn_q.weight", inPlace) > kOtherSlot &&
+                 distanceThrough(layer.key, model, block + "attn_k.weight", halfSplitRowOf) < kSlotBound &&
+                 distanceThrough(layer.key, model, block + "attn_k.weight", inPlace) > kOtherSlot;
+        kept = kept && distanceThrough(layer.value, model, block + "attn_v.weight", inPlace) < kSlotBound &&
+               distanceThrough(layer.output, model, block + "attn_output.weight", inPlace) < kSlotBound &&
+               distanceThrough(layer.gate, model, block + "ffn_gate.weight", inPlace) < kSlotBound &&
+               distanceThrough(layer.up, model, block + "ffn_up.weight", inPlace) < kSlotBound &&
+               distanceThrough(layer.down, model, block + "ffn_down.weight", inPlace) < kSlotBound;
+    }
+    test.check(paired, "each query and key row is the source's row of the same channel of the same pair, not its own");
+    test.check(kept, "while the value, output and feed-forward rows stay where they are");
+    test.check(distanceThrough(view.embedding(), model, "token_embd.weight", inPlace) < kSlotBound,
+               "and so does the embedding");
+}
 
 /**
  * @brief A model of F32 matrices converts to an image whose every slot, header field, token and merge reads back as
