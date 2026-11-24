@@ -4,11 +4,11 @@
  *
  * llama.cpp runs a sequence in one decode, every position's logits kept, its keys cached in F32 rather than its default
  * F16 (llama.cpp:18523), its values in F16, the only type b3775 caches them in without flash attention
- * (llama.cpp:18719-18720), and the residual stream's peak read at each layer's output (`l_out`). lpl::infer runs the image layer
- * by layer through attentionBlock and feedForwardBlock, so that its residual stream's peak and the values it saturates
- * are counted, and its logits must equal Transformer::forward's, bit for bit. Two engines agree at a position when
- * their most likely tokens are the same; a position is judged when llama.cpp's own margin between its first two tokens
- * is at least kAgreementMargin, declared before any run.
+ * (llama.cpp:18719-18720), and the residual stream's peak read at each layer's output (`l_out`). lpl::infer runs the
+ * image layer by layer through attentionBlock and feedForwardBlock, so that its residual stream's peak and the values
+ * it saturates are counted, and its logits must equal Transformer::forward's, bit for bit. Two engines agree at a
+ * position when their most likely tokens are the same; a position is judged when llama.cpp's own margin between its
+ * first two tokens is at least kAgreementMargin, declared before any run.
  *
  * @author MasterLaplace
  * @version 0.1.0
