@@ -511,7 +511,8 @@ template <core::u32 Bytes>
  *        turn token.
  *
  * A text the room cut short fills it, and the turn token after it then finds no room. The last text of a turn has no
- * token after it, so it is encoded apart first, then written token by token.
+ * token after it, so it is encoded apart first, then written token by token; it is the format's own, the assistant's
+ * role and a newline, and holds no message.
  */
 class TurnWriter {
 public:
@@ -547,14 +548,12 @@ public:
     {
         if (_verdict != ChatTurnVerdict::Encoded)
             return;
-        const core::u32 first = _written;
         core::u32 tokens[kChatMlAssistantOpeningBytes]{};
         core::u32 skipped = 0u;
         const core::u32 encoded = _tokenizer.encode(bytes, count, tokens, kChatMlAssistantOpeningBytes, skipped);
         _skipped += skipped;
         for (core::u32 at = 0u; at < encoded; ++at)
             token(tokens[at]);
-        refuseTurnTokensFrom(first);
     }
 
     [[nodiscard]] ChatTurnReport report() const noexcept { return ChatTurnReport{_verdict, _written, _skipped}; }
