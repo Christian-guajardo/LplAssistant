@@ -351,6 +351,17 @@ core::u32 sortByText(core::u32 *order, const char *blob, const VocabEntry *entri
 
 core::u32 gVocabularySortFallbacks = 0u;
 
+/**
+ * @brief The longest of @p count tokens, kMaxTokenBytes at most: no prefix longer than it can be a token.
+ */
+core::u32 longestTokenBytes(const VocabEntry *entries, core::u32 count) noexcept
+{
+    core::u32 longest = 0u;
+    for (core::u32 i = 0u; i < count; ++i)
+        longest = entries[i].length > longest ? entries[i].length : longest;
+    return longest < kMaxTokenBytes ? longest : kMaxTokenBytes;
+}
+
 } // namespace
 
 core::u32 sortVocabularyIndex(core::u32 *order, const char *blob, const VocabEntry *entries, core::u32 count,
@@ -396,6 +407,7 @@ bool Vocab::borrow(TensorArena &arena, const char *blob, core::u32 blobBytes, co
     _sorted = order;
     _count = count;
     _blobBytes = blobBytes;
+    _longestPrefixBytes = longestTokenBytes(entries, count);
     return true;
 }
 
@@ -437,7 +449,7 @@ core::u32 Vocab::longestPrefix(const char *bytes, core::u32 available, core::u32
         return kNoToken;
 
     // Longest first, so the first hit is the answer and there is no tie to break.
-    core::u32 limit = available < kMaxTokenBytes ? available : kMaxTokenBytes;
+    core::u32 limit = available < _longestPrefixBytes ? available : _longestPrefixBytes;
     for (core::u32 length = limit; length > 0u; --length)
     {
         const core::u32 token = find(bytes, length);
