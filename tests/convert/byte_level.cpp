@@ -76,7 +76,9 @@ LPL_TEST(a_token_reads_back_as_its_bytes_and_text_outside_the_alphabet_does_not)
                "and so are the space and U+00AD, which the alphabet writes as other characters");
     test.check(!lpl::convert::byteLevelBytes("\xC4").has_value() && !lpl::convert::byteLevelBytes("\x80").has_value(),
                "a sequence cut short or a lone continuation byte is not UTF-8");
-    test.check(!lpl::convert::byteLevelBytes("\xA1").has_value() && !lpl::convert::byteLevelBytes("a\xBFb").has_value(),
+    test.check(!lpl::convert::byteLevelBytes("\xA1").has_value() && !lpl::convert::byteLevelBytes("a\xBF"
+                                                                                                  "b")
+                                                                         .has_value(),
                "even one whose value, read as a code point, the alphabet holds: U+00A1 is written as two bytes");
     test.check(!lpl::convert::byteLevelBytes("\xC0\xA1").has_value(), "nor is an overlong encoding of !");
 }
