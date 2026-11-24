@@ -59,6 +59,7 @@ enum class ModelReadVerdict : core::u32 {
     VocabularyRefused = 5u, ///< A token is empty, longer than a token may be, or past the vocabulary's text.
     ArenaExhausted = 6u,    ///< The arena cannot hold what the reading claims.
     MergesRefused = 7u,     ///< A merge names a token past the vocabulary, is not the concatenation, or repeats a pair.
+    ChatTokensMissing = 8u, ///< The vocabulary lacks a token its chat format needs: `<|im_start|>` or `<|im_end|>`.
 };
 
 /**
@@ -89,7 +90,7 @@ inline constexpr core::u32 kModelViewAlignment = alignof(QuantBlock);
  * @brief The name a boot line gives a reading's verdict.
  * @param verdict A verdict.
  * @return "read", "misaligned", "big_endian_host", "image_refused", "signature_mismatch", "vocabulary_refused",
- *         "arena_exhausted" or "merges_refused"; "unknown" otherwise.
+ *         "arena_exhausted", "merges_refused" or "chat_tokens_missing"; "unknown" otherwise.
  */
 [[nodiscard]] const char *modelReadVerdictName(ModelReadVerdict verdict) noexcept;
 
@@ -201,11 +202,12 @@ public:
      * @param vocab        An already-built table; its size must match @c shape.vocabSize.
      * @param merges       Its ranked merges, indexed against @p vocab; borrowed, so they must outlive the model.
      * @param preTokenizer How text splits before it is segmented.
+     * @param chatFormat   How messages are put in its turns; their tokens are found in @p vocab by their text.
      * @param seed         Master seed.
-     * @return false when the shape is invalid or the arena is exhausted.
+     * @return false when the shape is invalid, the arena is exhausted or @p vocab lacks a token @p chatFormat needs.
      */
     bool synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab &vocab, const BytePairMerges &merges,
-                    PreTokenizer preTokenizer, core::u32 seed);
+                    PreTokenizer preTokenizer, ChatFormat chatFormat, core::u32 seed);
 
     /**
      * @brief Reads a baked image into @p arena.
@@ -215,7 +217,8 @@ public:
      * reads an image on a word boundary where it lies instead, and @ref copy says what a refused image failed.
      *
      * The image is one of version 1 (lpl/infer/ModelImage.hpp), read through its table, each segment's signature
-     * checked before its bytes are taken; any other version is refused.
+     * checked before its bytes are taken; any other version is refused. The tokens of its chat format's turns are then
+     * found in its vocabulary by their text, and a vocabulary that lacks one the format needs is refused.
      *
      * @param arena Storage.
      * @param bytes The image.
@@ -313,6 +316,13 @@ public:
     [[nodiscard]] PreTokenizer preTokenizer() const noexcept { return _preTokenizer; }
 
     /**
+     * @brief How messages are put in the model's turns, and the tokens of its turns.
+     * @return The format and its tokens, found in the vocabulary; Plain, without tokens, for a model a seed derives
+     *         without one.
+     */
+    [[nodiscard]] const ChatTokens &chatTokens() const noexcept { return _chatTokens; }
+
+    /**
      * @brief One block's tensors.
      * @param index Block index.
      * @return Its weights.
@@ -384,6 +394,7 @@ private:
     Vocab _vocab{};
     BytePairMerges _merges{};
     PreTokenizer _preTokenizer{PreTokenizer::WholeText};
+    ChatTokens _chatTokens{};
     QuantMatrixView _embedding{};
     ConstVectorView _finalNorm{};
     RotaryFrequencies _rotary{};

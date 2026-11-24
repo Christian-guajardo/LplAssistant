@@ -51,6 +51,7 @@ struct GenerationReport {
     bool windowExhausted{false};  ///< The cache refused a position and stopped it.
     bool grammarExhausted{false}; ///< The grammar admitted nothing and stopped it.
     bool grammarComplete{false};  ///< The output is a whole phrase of the grammar.
+    bool endOfTurn{false};        ///< The model ended its turn; the token that ended it is not among the output.
 };
 
 /**
@@ -71,7 +72,12 @@ public:
     bool initialise(TensorArena &arena, const Model &model, CachePolicy policy);
 
     /**
-     * @brief Feeds a prompt and produces tokens.
+     * @brief Feeds a prompt and produces tokens, until the ceiling, the grammar, the window or the model's end of turn
+     *        stops it.
+     *
+     * A token that ends the model's turn (ChatTokens::endsTurn), `<|im_end|>` or `<|endoftext|>` for a ChatML model,
+     * stops the generation and is not written: it closes the answer, it is not part of it. A Plain model has no such
+     * token, and generates until something else stops it.
      *
      * The prompt is fed one position at a time and its logits are discarded, which
      * is the cost of a cache that holds one token's key per slot. A batched prefill

@@ -514,6 +514,9 @@ void viewExpert(const core::u8 *&cursor, const ModelConfig &shape, LayerWeights 
     viewMatrix(cursor, shape.dim, shape.ffnHidden, out.down);
 }
 
+/** The one-based entry of an image's vocabulary, which a refusal of its turn tokens names. */
+constexpr core::u32 kVocabularyEntry = 1u;
+
 /**
  * @struct ImageWeights
  * @brief What a reading has taken so far, adopted by the model once every segment is read.
@@ -696,18 +699,21 @@ bool Model::synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab
     _vocab = vocab;
     _merges = BytePairMerges{};
     _preTokenizer = PreTokenizer::WholeText;
+    _chatTokens = ChatTokens{};
     _layers = layers;
     return true;
 }
 
 bool Model::synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab &vocab, const BytePairMerges &merges,
-                       PreTokenizer preTokenizer, core::u32 seed)
+                       PreTokenizer preTokenizer, ChatFormat chatFormat, core::u32 seed)
 {
-    if (!synthesise(arena, shape, vocab, seed))
+    ChatTokens chatTokens{};
+    if (!findChatTokens(chatFormat, vocab, chatTokens) || !synthesise(arena, shape, vocab, seed))
         return false;
 
     _merges = merges;
     _preTokenizer = preTokenizer;
+    _chatTokens = chatTokens;
     return true;
 }
 
@@ -736,10 +742,15 @@ ModelReadReport Model::readImage(TensorArena &arena, const core::u8 *bytes, core
             return ModelReadReport{read, ModelImageVerdict::Accepted, index + 1u};
     }
 
+    ChatTokens chatTokens{};
+    if (!findChatTokens(inspection.header.chatFormat, weights.vocab, chatTokens))
+        return ModelReadReport{ModelReadVerdict::ChatTokensMissing, ModelImageVerdict::Accepted, kVocabularyEntry};
+
     _config = inspection.header.shape;
     _vocab = weights.vocab;
     _merges = weights.merges;
     _preTokenizer = inspection.header.preTokenizer;
+    _chatTokens = chatTokens;
     _embedding = weights.embedding;
     _finalNorm = weights.finalNorm;
     _rotary = weights.rotary;
@@ -778,6 +789,7 @@ const char *modelReadVerdictName(ModelReadVerdict verdict) noexcept
     case ModelReadVerdict::VocabularyRefused: return "vocabulary_refused";
     case ModelReadVerdict::ArenaExhausted: return "arena_exhausted";
     case ModelReadVerdict::MergesRefused: return "merges_refused";
+    case ModelReadVerdict::ChatTokensMissing: return "chat_tokens_missing";
     }
     return "unknown";
 }
@@ -835,6 +847,7 @@ core::u32 Model::writeBlob(core::u8 *out, core::u32 capacity, core::u32 alignmen
     header.vocabTextBytes = _vocab.blobBytes();
     header.mergeCount = _merges.size();
     header.preTokenizer = _preTokenizer;
+    header.chatFormat = _chatTokens.format;
     writeModelImageHeader(out, header);
     return needed;
 }

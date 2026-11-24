@@ -49,6 +49,7 @@ constexpr core::u32 kHeaderNormEpsilon = 60u;
 constexpr core::u32 kHeaderMergeCount = 64u;
 constexpr core::u32 kHeaderPreTokenizer = 68u;
 constexpr core::u32 kHeaderKeyValueHeads = 72u;
+constexpr core::u32 kHeaderChatFormat = 76u;
 /** @} */
 
 /**
@@ -199,6 +200,7 @@ ModelImageHeader readHeader(const core::u8 *bytes) noexcept
     header.shape.keyValueHeads = wordAt(bytes, kHeaderKeyValueHeads);
     header.mergeCount = wordAt(bytes, kHeaderMergeCount);
     header.preTokenizer = static_cast<PreTokenizer>(wordAt(bytes, kHeaderPreTokenizer));
+    header.chatFormat = static_cast<ChatFormat>(wordAt(bytes, kHeaderChatFormat));
     return header;
 }
 
@@ -215,6 +217,8 @@ ModelImageVerdict judgeHeader(const core::u8 *bytes, core::u64 size, const Model
         return ModelImageVerdict::BadShape;
     if (!isKnownPreTokenizer(wordAt(bytes, kHeaderPreTokenizer)))
         return ModelImageVerdict::UnknownPreTokenizer;
+    if (!isKnownChatFormat(wordAt(bytes, kHeaderChatFormat)))
+        return ModelImageVerdict::UnknownChatFormat;
     if (header.imageBytes != size)
         return ModelImageVerdict::BadImageBytes;
     return ModelImageVerdict::Accepted;
@@ -373,6 +377,7 @@ void writeModelImageHeader(core::u8 *image, const ModelImageHeader &header) noex
     putWordAt(image, kHeaderKeyValueHeads, header.shape.keyValueHeads);
     putWordAt(image, kHeaderMergeCount, header.mergeCount);
     putWordAt(image, kHeaderPreTokenizer, static_cast<core::u32>(header.preTokenizer));
+    putWordAt(image, kHeaderChatFormat, static_cast<core::u32>(header.chatFormat));
 }
 
 void writeModelSegmentEntry(core::u8 *image, core::u32 index, const ModelSegment &segment) noexcept
@@ -419,6 +424,7 @@ const char *modelImageVerdictName(ModelImageVerdict verdict) noexcept
     case ModelImageVerdict::SegmentOverlaps: return "segment_overlaps";
     case ModelImageVerdict::SegmentOutside: return "segment_outside";
     case ModelImageVerdict::UnknownPreTokenizer: return "unknown_pre_tokenizer";
+    case ModelImageVerdict::UnknownChatFormat: return "unknown_chat_format";
     }
     return "unknown";
 }

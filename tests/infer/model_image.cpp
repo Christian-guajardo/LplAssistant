@@ -1,3 +1,4 @@
+#include "chat_vocabulary.hpp"
 #include "model_image_writer.hpp"
 
 #include <lpl/infer/ModelImage.hpp>
@@ -49,6 +50,12 @@ constexpr lpl::core::u32 kNormEpsilon = 42950u;       ///< 1e-5 in units of 2^-3
 constexpr lpl::core::u32 kGroupedHeads = 6u;          ///< Query heads of the grouped model: three per key/value head.
 constexpr lpl::core::u32 kGroupedKeyValueHeads = 2u;  ///< Its key and value heads.
 constexpr lpl::core::u32 kGroupedAttentionEntry = 3u; ///< One-based entry of the grouped image's first attention.
+constexpr lpl::core::usize kChatArenaBytes = 1024u * 1024u;
+constexpr lpl::core::u32 kChatMlWord = 1u; ///< The word of the ChatML format.
+constexpr lpl::core::u32 kTurnTokenCount = 3u;
+
+/** The three tokens of SmolLM2's turns, appended to the parity vocabulary at 121, 122 and 123. */
+constexpr const char *kTurnTokens[kTurnTokenCount] = {"<|endoftext|>", "<|im_start|>", "<|im_end|>"};
 
 /**
  * @brief The parity model's shape with the canonical vocabulary's size.
@@ -191,6 +198,15 @@ void putWordAt(lpl::core::u8 *bytes, lpl::core::u32 offset, lpl::core::u32 value
 }
 
 /**
+ * @brief Whether @p tokens are a ChatML turn's, with the three tokens appended to the parity vocabulary.
+ */
+[[nodiscard]] bool hasTheAppendedTurnTokens(const lpl::infer::ChatTokens &tokens)
+{
+    return tokens.format == lpl::infer::ChatFormat::ChatMl && tokens.endOfText == 121u && tokens.turnStart == 122u &&
+           tokens.turnEnd == 123u;
+}
+
+/**
  * @brief Whether @p lhs and @p rhs are the same null-terminated text.
  */
 [[nodiscard]] bool sameText(const char *lhs, const char *rhs)
@@ -274,7 +290,7 @@ void putWordAt(lpl::core::u8 *bytes, lpl::core::u32 offset, lpl::core::u32 value
  *        then one expert per layer on a 4 KiB boundary, then the merges, 64-byte aligned.
  *
  * @details Worked by hand for the parity shape (dim 48, 2 layers, 4 heads, feed-forward 96) with 121 tokens, 300
- *          bytes of text and 5 merges, a quantised block 36 bytes: the table ends at 76 + 9 * 40 = 436; the vocabulary
+ *          bytes of text and 5 merges, a quantised block 36 bytes: the table ends at 80 + 9 * 40 = 440; the vocabulary
  *          (8 * 121 + 300 = 1268) at 448; the embedding (121 rows of 2 blocks, 8712) at 1728; each attention (2 norms
  *          of 48 words and 4 matrices of 48 rows of 2 blocks, 14208) at 10496 and 24704; the final norm (192) at 38912,
  *          ending at 39104; the rotary table (6 pairs of a head of 12 channels, a word each, 24) at 39104, ending at
@@ -322,7 +338,7 @@ LPL_TEST(a_dense_model_lays_out_its_residents_then_one_expert_per_layer)
  *        14208.
  *
  * @details Worked by hand for the parity shape with 6 heads of 8 channels and 2 key/value heads, 121 tokens, 300 bytes
- *          of text and 5 merges: the table ends at 76 + 9 * 40 = 436; the vocabulary (1268) at 448; the embedding
+ *          of text and 5 merges: the table ends at 80 + 9 * 40 = 440; the vocabulary (1268) at 448; the embedding
  *          (8712) at 1728; each attention (2 norms of 48 words, 384; query and output of 48 rows of 2 blocks, 3456
  *          each; key and value of 16 rows of 2 blocks, 1152 each: 9600) at 10496 and 20096; the final norm (192) at
  *          29696; the rotary table (4 pairs of a head of 8 channels, 16) at 29888, ending at 29904; each expert (19008)
@@ -594,6 +610,8 @@ LPL_TEST(every_corruption_of_the_header_or_the_table_is_refused_by_name)
                "header bytes of 64, as LplAssistant 0.6.2 wrote, without a merge count or a pre-tokenizer");
     test.check(refusedWith(image, size, kHeaderBytesWord, 72u, lpl::infer::ModelImageVerdict::BadHeader, 0u),
                "header bytes of 72, without a count of key/value heads");
+    test.check(refusedWith(image, size, kHeaderBytesWord, 76u, lpl::infer::ModelImageVerdict::BadHeader, 0u),
+               "header bytes of 76, without a chat format");
     test.check(refusedWith(image, size, kHeaderAlignmentWord, 11u, lpl::infer::ModelImageVerdict::BadAlignment, 0u) &&
                    refusedWith(image, size, kHeaderAlignmentWord, 23u, lpl::infer::ModelImageVerdict::BadAlignment, 0u),
                "an alignment of 2^11 or 2^23");
@@ -1094,7 +1112,154 @@ LPL_TEST(every_verdict_of_a_reading_has_its_name)
                    sameText(name(lpl::infer::ModelReadVerdict::ImageRefused), "image_refused") &&
                    sameText(name(lpl::infer::ModelReadVerdict::SignatureMismatch), "signature_mismatch") &&
                    sameText(name(lpl::infer::ModelReadVerdict::VocabularyRefused), "vocabulary_refused") &&
-                   sameText(name(lpl::infer::ModelReadVerdict::ArenaExhausted), "arena_exhausted"),
+                   sameText(name(lpl::infer::ModelReadVerdict::ArenaExhausted), "arena_exhausted") &&
+                   sameText(name(lpl::infer::ModelReadVerdict::MergesRefused), "merges_refused") &&
+                   sameText(name(lpl::infer::ModelReadVerdict::ChatTokensMissing), "chat_tokens_missing"),
                "each verdict its name");
     test.check(sameText(name(static_cast<lpl::infer::ModelReadVerdict>(99u)), "unknown"), "and an unknown value");
+}
+
+/**
+ * @brief A model's chat format goes through its image: the header's word at byte 76 says ChatML, and a copy and a
+ *        reading in place find the tokens of its turns again in the vocabulary; the parity model's image says Plain.
+ */
+LPL_TEST(an_image_carries_its_chat_format_through_a_copy_and_a_reading_in_place)
+{
+    lpl::infer::TensorArena arena{kChatArenaBytes};
+    lpl::infer::Vocab chatVocab;
+    lpl::infer::Vocab parityVocab;
+    lpl::infer::Model chat;
+    lpl::infer::Model parity;
+    lpl::core::u32 chatSize = 0u;
+    lpl::core::u32 paritySize = 0u;
+
+    test.check(lpl::infer::tests::buildParityVocabularyWith(arena, kTurnTokens, kTurnTokenCount, chatVocab) &&
+                   lpl::infer::tests::synthesiseParityModelOver(arena, chatVocab, lpl::infer::ChatFormat::ChatMl,
+                                                                lpl::infer::parityModelConfig().contextLength, chat) &&
+                   synthesiseParityModel(arena, parityVocab, parity),
+               "a ChatML model over the parity vocabulary and three turn tokens builds, and so does the parity model");
+    lpl::core::u8 *const chatImage =
+        lpl::infer::tests::writeModelImage(arena, chat, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, chatSize);
+    lpl::core::u8 *const parityImage =
+        lpl::infer::tests::writeModelImage(arena, parity, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, paritySize);
+    if (!test.check(chatImage != nullptr && parityImage != nullptr, "and both are written"))
+        return;
+
+    const lpl::infer::ModelImageInspection chatInspection =
+        lpl::infer::inspectModelImage(chatImage, chatSize, nullptr, 0u);
+    const lpl::infer::ModelImageInspection parityInspection =
+        lpl::infer::inspectModelImage(parityImage, paritySize, nullptr, 0u);
+    lpl::infer::Model copied;
+    lpl::infer::Model viewed;
+    lpl::infer::Model parityViewed;
+    const bool copiedRead = copied.copy(arena, chatImage, chatSize).verdict == lpl::infer::ModelReadVerdict::Read;
+    const bool viewedRead = viewed.view(arena, chatImage, chatSize).verdict == lpl::infer::ModelReadVerdict::Read;
+
+    test.check(chatInspection.verdict == lpl::infer::ModelImageVerdict::Accepted &&
+                   chatInspection.header.chatFormat == lpl::infer::ChatFormat::ChatMl &&
+                   wordAt(chatImage, lpl::infer::tests::kHeaderChatFormatByte) == kChatMlWord,
+               "the ChatML image's header holds 1 at byte 76");
+    test.check(copiedRead && hasTheAppendedTurnTokens(copied.chatTokens()),
+               "copied, the model has a ChatML turn: <|im_start|> 122, <|im_end|> 123, <|endoftext|> 121");
+    test.check(viewedRead && hasTheAppendedTurnTokens(viewed.chatTokens()), "and read in place, it has them too");
+    test.check(parityInspection.verdict == lpl::infer::ModelImageVerdict::Accepted &&
+                   parityInspection.header.chatFormat == lpl::infer::ChatFormat::Plain &&
+                   wordAt(parityImage, lpl::infer::tests::kHeaderChatFormatByte) == 0u &&
+                   parityViewed.view(arena, parityImage, paritySize).verdict == lpl::infer::ModelReadVerdict::Read &&
+                   parityViewed.chatTokens().format == lpl::infer::ChatFormat::Plain &&
+                   parityViewed.chatTokens().turnEnd == lpl::infer::kNoToken,
+               "the parity model's image says Plain, and the model read from it has no turn");
+    test.measure("chat_image_bytes", chatSize);
+}
+
+/**
+ * @brief A chat format this reader does not know is refused at the header by its name, unknown_chat_format, and the
+ *        model is not read.
+ */
+LPL_TEST(a_chat_format_this_reader_does_not_know_is_refused_by_name)
+{
+    lpl::infer::TensorArena arena{lpl::infer::parityArenaBytes()};
+    lpl::infer::Vocab vocab;
+    lpl::infer::Model model;
+    lpl::core::u32 size = 0u;
+
+    test.check(synthesiseParityModel(arena, vocab, model), "the parity model builds");
+    lpl::core::u8 *const image =
+        lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size);
+    if (!test.check(image != nullptr, "and is written"))
+        return;
+
+    test.check(refusedByName(image, size, lpl::infer::tests::kHeaderChatFormatByte, 2u, "unknown_chat_format") &&
+                   refusedWith(image, size, lpl::infer::tests::kHeaderChatFormatByte, 0xFFFFFFFFu,
+                               lpl::infer::ModelImageVerdict::UnknownChatFormat, 0u),
+               "a chat format of 2, or of 0xFFFFFFFF, is refused at the header as unknown_chat_format");
+
+    lpl::infer::tests::putChatFormatWord(image, 2u);
+    lpl::infer::Model refused;
+    const lpl::infer::ModelReadReport report = refused.view(arena, image, size);
+    lpl::infer::tests::putChatFormatWord(image, 0u);
+    test.check(report.verdict == lpl::infer::ModelReadVerdict::ImageRefused &&
+                   report.image == lpl::infer::ModelImageVerdict::UnknownChatFormat && !refused.ready(),
+               "and the model is not read");
+}
+
+/**
+ * @brief An image whose format needs a token its vocabulary lacks is refused by name, chat_tokens_missing, naming the
+ *        vocabulary's entry: the parity vocabulary read as ChatML, or one that has <|im_start|> and no <|im_end|>. One
+ *        that lacks <|endoftext|> alone is read.
+ */
+LPL_TEST(a_vocabulary_without_the_tokens_of_its_format_is_refused_by_name)
+{
+    lpl::infer::TensorArena arena{kChatArenaBytes};
+    lpl::infer::Vocab parityVocab;
+    lpl::infer::Vocab turnStartOnly;
+    lpl::infer::Vocab withoutEndOfText;
+    lpl::infer::Model parity;
+    lpl::infer::Model halfTurn;
+    lpl::infer::Model noEndOfText;
+    lpl::core::u32 paritySize = 0u;
+    lpl::core::u32 halfSize = 0u;
+    lpl::core::u32 noEndSize = 0u;
+
+    test.check(
+        synthesiseParityModel(arena, parityVocab, parity) &&
+            lpl::infer::tests::buildParityVocabularyWith(arena, kTurnTokens + 1u, 1u, turnStartOnly) &&
+            lpl::infer::tests::synthesiseParityModelOver(arena, turnStartOnly, lpl::infer::ChatFormat::Plain,
+                                                         lpl::infer::parityModelConfig().contextLength, halfTurn) &&
+            lpl::infer::tests::buildParityVocabularyWith(arena, kTurnTokens + 1u, 2u, withoutEndOfText) &&
+            lpl::infer::tests::synthesiseParityModelOver(arena, withoutEndOfText, lpl::infer::ChatFormat::ChatMl,
+                                                         lpl::infer::parityModelConfig().contextLength, noEndOfText),
+        "the parity model, a Plain model with <|im_start|> alone and a ChatML one without <|endoftext|> build");
+    lpl::core::u8 *const parityImage =
+        lpl::infer::tests::writeModelImage(arena, parity, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, paritySize);
+    lpl::core::u8 *const halfImage =
+        lpl::infer::tests::writeModelImage(arena, halfTurn, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, halfSize);
+    lpl::core::u8 *const noEndImage = lpl::infer::tests::writeModelImage(
+        arena, noEndOfText, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, noEndSize);
+    if (!test.check(parityImage != nullptr && halfImage != nullptr && noEndImage != nullptr, "and are written"))
+        return;
+
+    lpl::infer::tests::putChatFormatWord(parityImage, kChatMlWord);
+    lpl::infer::tests::putChatFormatWord(halfImage, kChatMlWord);
+    lpl::infer::Model viewed;
+    lpl::infer::Model copied;
+    lpl::infer::Model half;
+    lpl::infer::Model whole;
+    const lpl::infer::ModelReadReport inPlace = viewed.view(arena, parityImage, paritySize);
+    const lpl::infer::ModelReadReport copy = copied.copy(arena, parityImage, paritySize);
+    const lpl::infer::ModelReadReport halfReport = half.view(arena, halfImage, halfSize);
+    const lpl::infer::ModelReadReport wholeReport = whole.view(arena, noEndImage, noEndSize);
+
+    test.check(inPlace.verdict == lpl::infer::ModelReadVerdict::ChatTokensMissing && inPlace.segment == 1u &&
+                   !viewed.ready() &&
+                   sameText(lpl::infer::modelReadVerdictName(inPlace.verdict), "chat_tokens_missing"),
+               "the parity vocabulary read as ChatML in place is refused as chat_tokens_missing, naming entry 1");
+    test.check(copy.verdict == lpl::infer::ModelReadVerdict::ChatTokensMissing && copy.segment == 1u && !copied.ready(),
+               "and so is its copy");
+    test.check(halfReport.verdict == lpl::infer::ModelReadVerdict::ChatTokensMissing && halfReport.segment == 1u &&
+                   !half.ready(),
+               "a vocabulary with <|im_start|> and no <|im_end|> is refused too");
+    test.check(wholeReport.verdict == lpl::infer::ModelReadVerdict::Read && whole.chatTokens().turnStart == 121u &&
+                   whole.chatTokens().turnEnd == 122u && whole.chatTokens().endOfText == lpl::infer::kNoToken,
+               "and one without <|endoftext|> is read, its turn without an end of text");
 }

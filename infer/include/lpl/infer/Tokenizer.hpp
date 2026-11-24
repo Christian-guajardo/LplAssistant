@@ -11,6 +11,10 @@
  * A vocabulary without merges segments a piece by greedy longest match, which derives the segmentation from the
  * vocabulary alone: the parity model's vocabulary is spelled that way.
  *
+ * A model chooses how messages are put in its turns (ChatFormat), as it chooses its pre-tokenizer. The tokens that open
+ * and close a turn are found by their text in its own vocabulary, so their ids are written nowhere else; a turn token
+ * only ever comes from the format, never from the text of a message.
+ *
  * @author MasterLaplace
  * @version 0.1.0
  * @copyright MIT License
@@ -134,6 +138,52 @@ enum class PreTokenizer : core::u32 {
  * @return true for the value of a @ref PreTokenizer.
  */
 [[nodiscard]] bool isKnownPreTokenizer(core::u32 value) noexcept;
+
+/**
+ * @enum ChatFormat
+ * @brief How a model puts messages in its turns, and which tokens end its own.
+ */
+enum class ChatFormat : core::u32 {
+    Plain = 0u,  ///< No turn: a prompt is fed as it is, and no token ends a generation.
+    ChatMl = 1u, ///< `<|im_start|>` role, newline, content, `<|im_end|>`, newline: SmolLM2's turns, and Qwen2.5's.
+};
+
+/**
+ * @brief Whether @p value names a chat format this reader knows.
+ * @param value A word read from an image.
+ * @return true for the value of a @ref ChatFormat.
+ */
+[[nodiscard]] bool isKnownChatFormat(core::u32 value) noexcept;
+
+/**
+ * @struct ChatTokens
+ * @brief A model's chat format and the tokens of its turns, found by their text in its own vocabulary.
+ */
+struct ChatTokens {
+    ChatFormat format{ChatFormat::Plain}; ///< How the model puts messages in turns.
+    core::u32 turnStart{kNoToken};        ///< Opens a turn: `<|im_start|>`; kNoToken for Plain.
+    core::u32 turnEnd{kNoToken};          ///< Closes one and ends a generation: `<|im_end|>`; kNoToken for Plain.
+    core::u32 endOfText{kNoToken};        ///< Ends a generation too: `<|endoftext|>`; kNoToken when absent.
+
+    /**
+     * @brief Whether generating @p id ends the model's turn.
+     * @param id A token the model generated, never kNoToken.
+     * @return true for turnEnd and endOfText; never for a model without turns, whose tokens are all kNoToken.
+     */
+    [[nodiscard]] constexpr bool endsTurn(core::u32 id) const noexcept { return id == turnEnd || id == endOfText; }
+};
+
+/**
+ * @brief Finds the tokens of @p format's turns by their text in @p vocab.
+ *
+ * ChatMl needs `<|im_start|>` and `<|im_end|>`, and takes `<|endoftext|>` when the vocabulary has it; Plain needs none.
+ *
+ * @param format The model's format.
+ * @param vocab  Its vocabulary.
+ * @param out    Receives the format and its tokens; Plain's are all kNoToken.
+ * @return false when the vocabulary lacks a token the format needs, or the format is not one this reader knows.
+ */
+[[nodiscard]] bool findChatTokens(ChatFormat format, const Vocab &vocab, ChatTokens &out) noexcept;
 
 /**
  * @enum CharacterClass
@@ -264,6 +314,56 @@ private:
     core::u32 *_byteTokens{nullptr};
     core::u32 *_workspace{nullptr};
 };
+
+/**
+ * @enum ChatTurnVerdict
+ * @brief What putting messages in a model's turns found.
+ */
+enum class ChatTurnVerdict : core::u32 {
+    Encoded = 0u,        ///< Every token of the turn is written.
+    NoTurns = 1u,        ///< The tokens are a Plain model's: there is no turn, and nothing is written.
+    ArenaExhausted = 2u, ///< The arena cannot hold a turn's text: its role, a newline and its content.
+    OutOfRoom = 3u,      ///< The turn holds more tokens than the room; the room holds its first ones.
+};
+
+/**
+ * @struct ChatTurnReport
+ * @brief The verdict of putting messages in a turn, and what was written.
+ */
+struct ChatTurnReport {
+    ChatTurnVerdict verdict{ChatTurnVerdict::NoTurns}; ///< What was found.
+    core::u32 tokens{0u};                              ///< Tokens written.
+    core::u32 skipped{0u};                             ///< Bytes of the messages no token spells, dropped.
+};
+
+/**
+ * @brief Puts a system message and a user message in the model's turns, then opens the assistant's turn.
+ *
+ * ChatMl writes `<|im_start|>` system, newline, @p system, `<|im_end|>`, newline, `<|im_start|>` user, newline, @p
+ * user,
+ * `<|im_end|>`, newline, then `<|im_start|>` assistant and a newline: the ids SmolLM2's own chat template gives the
+ * messages [system, user] with add_generation_prompt. Each text between two turn tokens is encoded whole, as Hugging
+ * Face encodes it: a turn's role, its newline and its content are one text, so the pre-tokenizer sees a newline and
+ * the spaces after it together. A turn token only comes from the format: a message that holds the text `<|im_end|>`
+ * keeps it as text, encoded by the merges like any other, where Hugging Face would close the turn there.
+ *
+ * @param scratch     Storage for one turn's text at a time, as long as a role, a newline and the longer message; the
+ *                    caller reclaims it.
+ * @param tokenizer   Bound to the model's vocabulary, its merges and its pre-tokenizer.
+ * @param tokens      The model's chat format and the tokens of its turns.
+ * @param system      The system message's bytes; nullptr only when @p systemBytes is 0.
+ * @param systemBytes How many.
+ * @param user        The user message's bytes; nullptr only when @p userBytes is 0.
+ * @param userBytes   How many.
+ * @param out         Receives the turn's identifiers.
+ * @param capacity    Room in @p out.
+ * @return Encoded; otherwise why the turn is not whole: NoTurns for a Plain model's tokens or a tokenizer bound to no
+ *         vocabulary; ArenaExhausted, as for a null message with bytes, a caller's error; OutOfRoom, the room holding
+ *         the turn's first tokens.
+ */
+[[nodiscard]] ChatTurnReport encodeChatTurn(TensorArena &scratch, const Tokenizer &tokenizer, const ChatTokens &tokens,
+                                            const char *system, core::u32 systemBytes, const char *user,
+                                            core::u32 userBytes, core::u32 *out, core::u32 capacity) noexcept;
 
 } // namespace lpl::infer
 

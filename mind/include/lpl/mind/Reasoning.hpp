@@ -58,13 +58,29 @@ inline constexpr core::u32 kMaxLegalPhrases = 16u;
 inline constexpr core::u32 kReasoningPromptBytes = 12u;
 
 /**
+ * Tokens of the chat turn a model with turns is fed before a decision: the mind's system message, the whole goal and
+ * the opening of the assistant's turn. A turn that needs more is decided by rule.
+ */
+inline constexpr core::u32 kReasoningChatTurnTokens = 128u;
+
+/**
+ * The system message a model with turns decides under: the mind's policy, not the model's, so a model's own default
+ * system message is never used.
+ */
+inline constexpr char kReasoningSystemMessage[] = "Choose the next action.";
+
+/**
  * @class ModelReasoner
  * @brief Chooses the next act by constrained generation.
  */
 class ModelReasoner final : public agent::IDecider {
-  public:
+public:
     /**
-     * @brief Wires the model, the vocabulary and the two arenas.
+     * @brief Wires the model, the vocabulary and the two arenas, and binds a tokenizer to the model's merges and its
+     *        pre-tokenizer.
+     *
+     * A model with turns (infer::ChatFormat) is fed each goal whole in its chat turn, under kReasoningSystemMessage;
+     * a Plain model is fed the goal's first kReasoningPromptBytes bytes as they are.
      *
      * TWO arenas, and they must not be the same one. @p persistent holds the cache and
      * the working buffers for the whole session; @p scratch holds one step's grammar
@@ -72,10 +88,10 @@ class ModelReasoner final : public agent::IDecider {
      * mid-session would hand a live matrix's storage to the next grammar, which is
      * exactly the failure its own `reset()` documentation warns about.
      *
-     * @param persistent Storage for the inference façade; never reset here.
-     * @param scratch    Storage for per-step grammars; reset on every decision.
+     * @param persistent Storage for the inference façade and the tokenizer; never reset here.
+     * @param scratch    Storage for per-step grammars and chat turns; reset on every decision.
      * @param model      The weights.
-     * @param vocab      The token table.
+     * @param vocab      The model's token table, the one its merges are indexed against.
      * @param seed       Sampler stream seed.
      * @return false when the model is unbuilt or an arena is exhausted.
      */
@@ -114,9 +130,18 @@ class ModelReasoner final : public agent::IDecider {
     /// Tokens the model produced across the session.
     [[nodiscard]] core::u32 tokensGenerated() const noexcept { return _tokensGenerated; }
 
-  private:
+    /**
+     * @brief Decisions whose goal went to the model in its chat turn.
+     * @return The count; 0 for a model without turns, whose goal is fed as it is.
+     */
+    [[nodiscard]] core::u32 chatTurns() const noexcept { return _chatTurns; }
+
+private:
+    [[nodiscard]] bool encodeGoal(const agent::DecisionContext &context, core::u32 *out, core::u32 &count) noexcept;
+
     infer::TensorArena *_scratch{nullptr};
-    const infer::Vocab *_vocab{nullptr};
+    infer::Tokenizer _tokenizer{};
+    infer::ChatTokens _chatTokens{};
     infer::Inference _inference{};
     DeterministicReasoner _fallback{};
     core::u32 _seed{0u};
@@ -125,6 +150,7 @@ class ModelReasoner final : public agent::IDecider {
     core::u32 _grammarExhausted{0u};
     core::u32 _completions{0u};
     core::u32 _tokensGenerated{0u};
+    core::u32 _chatTurns{0u};
     bool _ready{false};
 };
 
