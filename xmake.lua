@@ -243,6 +243,9 @@ if kHasFoundation then
 end
 
 includes("infer", "mind", "satellite", "voice", "research", "backend")
+if kHasFoundation then
+    includes("convert")
+end
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Applications
@@ -313,13 +316,24 @@ if kHasFoundation then
 
 -- The gate tests: every LPL_TEST of tests/<module>/, in KTAP. A debug LplKernel runs the same
 -- sources in ring 0, and its records must equal these. `xmake run test-assistant 'satellite.*'`
--- runs one suite.
+-- runs one suite. tests/convert/ is the host tool's, which ring 0 never runs: test-convert.
 target("test-assistant")
     set_kind("binary")
     set_group("tests")
     set_default(false)
     add_deps("lpl-testing", "lpl-mind", "lpl-satellite", "lpl-foundation")
-    add_files("tests/*/*.cpp")
+    add_files("tests/*/*.cpp|convert/*.cpp")
+target_end()
+
+-- The GGUF converter's tests, on models they build: host only, since they read and write GGUF files
+-- through ggml and run llama.cpp. `xmake run test-convert 'convert_rotary.*'` runs one suite.
+target("test-convert")
+    set_kind("binary")
+    set_group("tests")
+    set_default(false)
+    add_deps("lpl-testing", "lpl-converter", "lpl-foundation")
+    add_files("tests/convert/*.cpp")
+    add_syslinks("pthread")
 target_end()
 
 target("test-grammar-constraint")

@@ -1,0 +1,31 @@
+# What llama.cpp b3775's convert_hf_to_gguf.py runs on, in the ranges its requirements/ allow, every package pinned:
+# tools/gguf_reference.py runs the converter on gguf_requirements.txt, which this file is compiled into by
+#   uv pip compile --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --generate-hashes \
+#       --index-strategy unsafe-best-match --extra-index-url https://download.pytorch.org/whl/cpu --no-header \
+#       --output-file gguf_requirements.txt gguf_requirements.in
+# The second group pins the packages the first pulls in, each published long before b3775's converter ran on it.
+torch==2.2.2+cpu
+numpy==1.26.4
+sentencepiece==0.2.0
+transformers==4.44.2
+tokenizers==0.19.1
+protobuf==4.25.5
+tqdm==4.66.5
+pyyaml==6.0.2
+safetensors==0.4.5
+huggingface-hub==0.24.7
+certifi==2024.8.30
+charset-normalizer==3.3.2
+filelock==3.16.1
+fsspec==2024.9.0
+idna==3.10
+jinja2==3.1.4
+markupsafe==2.1.5
+mpmath==1.3.0
+networkx==3.3
+packaging==24.1
+regex==2024.9.11
+requests==2.32.3
+sympy==1.13.3
+typing-extensions==4.12.2
+urllib3==2.2.3
