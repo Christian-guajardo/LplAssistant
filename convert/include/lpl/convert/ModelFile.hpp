@@ -39,8 +39,8 @@ public:
      * @brief Maps the file at @p path and reads its keys and tensors.
      * @param path The file.
      * @return Nothing when it is read; otherwise `file_missing` when no file is there, `file_unreadable` when it cannot
-     *         be mapped or ggml cannot parse it as a GGUF, `tensor_outside_file` when a tensor's offset lies past the
-     *         file's end.
+     *         be mapped or ggml cannot parse it as a GGUF, `metadata_repeated` when a key is written twice, which
+     *         llama.cpp reads as its first, `tensor_outside_file` when a tensor's offset lies past the file's end.
      */
     [[nodiscard]] std::optional<Refusal> open(const std::string &path);
 

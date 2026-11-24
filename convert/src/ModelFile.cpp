@@ -145,8 +145,14 @@ std::optional<Refusal> ModelFile::open(const std::string &path)
         return fileRefusal("file_unreadable", path, "ggml cannot parse it as a GGUF file");
 
     std::optional<Refusal> refusal;
-    for (int id = 0; id < gguf_get_n_kv(context); ++id)
-        _source.metadata[gguf_get_key(context, id)] = keyOf(context, id);
+    for (int id = 0; !refusal && id < gguf_get_n_kv(context); ++id)
+    {
+        const std::string key = gguf_get_key(context, id);
+        if (!_source.metadata.emplace(key, keyOf(context, id)).second)
+            refusal = fileRefusal("metadata_repeated", path,
+                                  key + " is written twice: llama.cpp would read the first, and the converter refuses "
+                                        "to choose");
+    }
     for (int id = 0; !refusal && id < gguf_get_n_tensors(context); ++id)
         refusal = tensorOf(context, meta, id, _bytes, _size, path, _source.tensors[gguf_get_tensor_name(context, id)]);
     gguf_free(context);

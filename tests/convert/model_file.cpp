@@ -101,7 +101,65 @@ void checkRoundTrip(lpl::testing::Test &test, lpl::convert::tests::SyntheticWeig
     std::filesystem::remove(path);
 }
 
+/**
+ * @brief @p value's @p bytes little-endian bytes, appended to @p out.
+ */
+void appendWord(std::string &out, std::uint64_t value, std::uint32_t bytes)
+{
+    for (std::uint32_t i = 0u; i < bytes; ++i)
+        out.push_back(static_cast<char>((value >> (8u * i)) & 0xFFu));
+}
+
+/**
+ * @brief A GGUF of version 3 holding no tensor and one string key per pair of @p keys, written byte by byte as
+ *        ggml's gguf_init_from_file reads it: gguf_set_val_str would replace a key named twice rather than repeat it.
+ */
+[[nodiscard]] std::string stringKeysFile(const std::vector<std::pair<std::string, std::string>> &keys)
+{
+    constexpr std::uint32_t kStringType = 8u;
+    std::string out = "GGUF";
+    appendWord(out, 3u, 4u);
+    appendWord(out, 0u, 8u);
+    appendWord(out, keys.size(), 8u);
+    for (const auto &[key, value] : keys)
+    {
+        appendWord(out, key.size(), 8u);
+        out += key;
+        appendWord(out, kStringType, 4u);
+        appendWord(out, value.size(), 8u);
+        out += value;
+    }
+    return out;
+}
+
 } // namespace
+
+/**
+ * @brief A key the file holds twice is refused by name: llama.cpp b3775 reads the first (gguf_find_key), a map would
+ *        keep the last, and the two engines would read two models from one file.
+ */
+LPL_TEST(a_key_the_file_holds_twice_is_refused_by_name)
+{
+    const std::string twice = lpl::convert::tests::temporaryPath("twice.gguf");
+    const std::string once = lpl::convert::tests::temporaryPath("once.gguf");
+    writeBytes(twice, stringKeysFile({
+                          {"general.architecture", "llama"},
+                          {"general.architecture", "mamba"}
+    }));
+    writeBytes(once, stringKeysFile({
+                         {"general.architecture", "llama"},
+                         {"general.name",         "mamba"}
+    }));
+
+    lpl::convert::ModelFile file;
+    const std::optional<lpl::convert::Refusal> refusal = file.open(twice);
+    test.check(refusal.has_value() && refusal->name == "metadata_repeated" &&
+                   refusal->detail.find("general.architecture") != std::string::npos,
+               "general.architecture written twice is metadata_repeated, naming the key");
+    test.check(outcomeOfOpening(once) == "read", "while two keys of two names are read");
+    std::filesystem::remove(twice);
+    std::filesystem::remove(once);
+}
 
 /**
  * @brief A model of F32 matrices, written as a GGUF file and read back, is the same model.
