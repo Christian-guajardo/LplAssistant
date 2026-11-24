@@ -451,6 +451,45 @@ LPL_TEST(a_turn_that_does_not_fit_is_refused_by_name)
 }
 
 /**
+ * @brief A byte no token spells is dropped and counted, in a message as in the texts of the turn itself: over a
+ *        vocabulary of <|im_start|>, <|im_end|> and x alone, a system message x and a user message x? are put in
+ *        <|im_start|> x <|im_end|> <|im_start|> x <|im_end|> <|im_start|>, and the 25 other bytes are counted: system,
+ *        a newline, a newline, user, a newline, ?, a newline, assistant and a newline.
+ */
+LPL_TEST(a_byte_no_token_spells_is_dropped_and_counted)
+{
+    constexpr char kText[] = "<|im_start|><|im_end|>x";
+    constexpr lpl::infer::VocabEntry kEntries[3] = {
+        {0u,  12u},
+        {12u, 10u},
+        {22u, 1u }
+    };
+    constexpr lpl::core::u32 kExpected[7] = {0u, 2u, 1u, 0u, 2u, 1u, 0u};
+    constexpr lpl::core::u32 kUnspelled = 25u;
+    lpl::infer::TensorArena arena{kScratchBytes};
+    lpl::infer::TensorArena scratch{kScratchBytes};
+    lpl::infer::Vocab vocab;
+    lpl::infer::ChatTokens tokens{};
+    lpl::core::u32 ids[kMostTurnIds]{};
+
+    if (!test.check(vocab.build(arena, kText, sizeof(kText) - 1u, kEntries, 3u) &&
+                        lpl::infer::findChatTokens(lpl::infer::ChatFormat::ChatMl, vocab, tokens),
+                    "a vocabulary of the two turn tokens and x builds, and has a ChatML turn"))
+        return;
+
+    const lpl::infer::Tokenizer tokenizer{vocab};
+    const lpl::infer::ChatTurnReport report =
+        lpl::infer::encodeChatTurn(scratch, tokenizer, tokens, "x", 1u, "x?", 2u, ids, kMostTurnIds);
+    bool same = report.tokens == 7u;
+    for (lpl::core::u32 at = 0u; same && at < report.tokens; ++at)
+        same = ids[at] == kExpected[at];
+
+    test.check(report.verdict == lpl::infer::ChatTurnVerdict::Encoded && same,
+               "the turn holds its five turn tokens and the two x");
+    test.check(report.skipped == kUnspelled, "and the 25 bytes no token spells are counted");
+}
+
+/**
  * @brief A ChatML model generates the tokens the Plain model read from the same image generates, up to its first
  *        <|im_end|>, and stops there without keeping it, its end of turn reported; a token that is no turn token, where
  *        SmolLM2 has <|endoftext|>, does not stop it. The control: the Plain model goes past both.

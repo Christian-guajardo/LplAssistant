@@ -19,7 +19,8 @@ namespace {
 
 constexpr lpl::core::usize kMindArenaBytes = 1024u * 1024u;
 constexpr lpl::core::usize kMindScratchBytes = 32u * 1024u;
-constexpr lpl::core::u32 kChatContext = 128u; ///< Positions that hold a chat turn and its answer.
+constexpr lpl::core::u32 kChatContext = 128u;   ///< Positions that hold a chat turn and its answer.
+constexpr lpl::core::u32 kDecisionTokens = 16u; ///< Tokens one decision may produce, as the reasoner bounds them.
 constexpr lpl::core::u32 kTurnTokenCount = 3u;
 constexpr lpl::core::u32 kWordPastTheWorkspace = lpl::infer::kBytePairWorkspaceSymbols + 1u;
 constexpr lpl::core::u32 kWordsUnderTheWorkspace = 4000u; ///< Letters of the first word of a goal of two words.
@@ -44,6 +45,28 @@ struct TurnRun {
     bool satisfied{false};             ///< Whether the world's goal was met.
     bool ran{false};                   ///< Whether the reasoner was set up and the turn ran.
 };
+
+/**
+ * @brief The tokens of the chat turn the mind puts the canonical goal in, over @p vocab, or 0 when it cannot be had.
+ */
+[[nodiscard]] lpl::core::u32 canonicalTurnTokens(lpl::infer::TensorArena &arena, const lpl::infer::Vocab &vocab)
+{
+    lpl::core::u8 *const block = arena.claim<lpl::core::u8>(kMindScratchBytes);
+    lpl::core::u32 *const ids = arena.claim<lpl::core::u32>(lpl::mind::kReasoningChatTurnTokens);
+    lpl::infer::ChatTokens tokens{};
+    if (block == nullptr || ids == nullptr ||
+        !lpl::infer::findChatTokens(lpl::infer::ChatFormat::ChatMl, vocab, tokens))
+        return 0u;
+
+    lpl::infer::TensorArena scratch{block, kMindScratchBytes};
+    const lpl::mind::Intent intent =
+        lpl::mind::parseIntent(reinterpret_cast<const lpl::core::u8 *>(kUtterance), sizeof(kUtterance) - 1u);
+    const lpl::infer::ChatTurnReport turn =
+        lpl::infer::encodeChatTurn(scratch, lpl::infer::Tokenizer{vocab}, tokens, lpl::mind::kReasoningSystemMessage,
+                                   sizeof(lpl::mind::kReasoningSystemMessage) - 1u, intent.text, intent.bytes, ids,
+                                   lpl::mind::kReasoningChatTurnTokens);
+    return turn.verdict == lpl::infer::ChatTurnVerdict::Encoded ? turn.tokens : 0u;
+}
 
 /**
  * @brief Runs the canonical turn over the parity world with a reasoner over @p model, into @p out.
@@ -150,9 +173,9 @@ LPL_TEST(the_grammar_makes_an_illegal_action_unspellable)
 
 /**
  * @brief A model with turns decides in its chat turn: every decision of a ChatML model puts the goal in its turn, and
- *        still names only what the world offers and finishes the job; no decision of the Plain model does. In the
- *        parity window of 32 positions, which the turn does not fit beside its answer, no decision of the ChatML model
- *        completes, where the Plain model's do: the turn is what the model is fed.
+ *        still names only what the world offers and finishes the job; no decision of the Plain model does. The turn is
+ *        what the model is fed, the mind's system message and the whole goal: in a window one position shorter than the
+ *        turn encodeChatTurn gives them, no decision completes, where one of that turn and 16 positions more lets them.
  */
 LPL_TEST(a_model_with_turns_decides_in_its_chat_turn)
 {
@@ -160,24 +183,31 @@ LPL_TEST(a_model_with_turns_decides_in_its_chat_turn)
     lpl::infer::Vocab vocab;
     lpl::infer::Model chat;
     lpl::infer::Model narrow;
+    lpl::infer::Model fitted;
     lpl::infer::Model plain;
     const lpl::core::u32 window = lpl::infer::parityModelConfig().contextLength;
 
-    if (!test.check(lpl::infer::tests::buildParityVocabularyWith(arena, kTurnTokens, kTurnTokenCount, vocab) &&
+    const bool built = lpl::infer::tests::buildParityVocabularyWith(arena, kTurnTokens, kTurnTokenCount, vocab);
+    const lpl::core::u32 turn = built ? canonicalTurnTokens(arena, vocab) : 0u;
+    if (!test.check(turn > window && turn + kDecisionTokens <= kChatContext &&
                         lpl::infer::tests::synthesiseParityModelOver(arena, vocab, lpl::infer::ChatFormat::ChatMl,
                                                                      kChatContext, chat) &&
                         lpl::infer::tests::synthesiseParityModelOver(arena, vocab, lpl::infer::ChatFormat::ChatMl,
-                                                                     window, narrow) &&
+                                                                     turn - 1u, narrow) &&
+                        lpl::infer::tests::synthesiseParityModelOver(arena, vocab, lpl::infer::ChatFormat::ChatMl,
+                                                                     turn + kDecisionTokens, fitted) &&
                         lpl::infer::tests::synthesiseParityModelOver(arena, vocab, lpl::infer::ChatFormat::Plain,
                                                                      window, plain),
-                    "a ChatML model of 128 positions, one of 32 and a Plain one of 32 build over the same vocabulary"))
+                    "the canonical turn passes the parity window, and four models build over the same vocabulary"))
         return;
 
     TurnRun chatRun{};
     TurnRun narrowRun{};
+    TurnRun fittedRun{};
     TurnRun plainRun{};
     runTheTurn(arena, chat, chatRun);
     runTheTurn(arena, narrow, narrowRun);
+    runTheTurn(arena, fitted, fittedRun);
     runTheTurn(arena, plain, plainRun);
 
     test.check(chatRun.ran && chatRun.generations > 0u && chatRun.chatTurns == chatRun.generations,
@@ -188,7 +218,10 @@ LPL_TEST(a_model_with_turns_decides_in_its_chat_turn)
                "no decision of the Plain model goes in a turn, and they complete");
     test.check(narrowRun.ran && narrowRun.generations > 0u && narrowRun.chatTurns == narrowRun.generations &&
                    narrowRun.completions == 0u,
-               "in 32 positions, the ChatML model's turn leaves no room to answer: none of its decisions completes");
+               "one position short of the turn, no decision completes");
+    test.check(fittedRun.ran && fittedRun.completions > 0u && fittedRun.illegalActions == 0u,
+               "in the turn and 16 positions more, decisions complete");
+    test.measure("turn_tokens", turn);
     test.measure("chat_generations", chatRun.generations);
     test.measure("chat_turns", chatRun.chatTurns);
     test.measure("chat_completions", chatRun.completions);

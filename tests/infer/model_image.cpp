@@ -1262,4 +1262,10 @@ LPL_TEST(a_vocabulary_without_the_tokens_of_its_format_is_refused_by_name)
     test.check(wholeReport.verdict == lpl::infer::ModelReadVerdict::Read && whole.chatTokens().turnStart == 121u &&
                    whole.chatTokens().turnEnd == 122u && whole.chatTokens().endOfText == lpl::infer::kNoToken,
                "and one without <|endoftext|> is read, its turn without an end of text");
+
+    lpl::infer::Model derived;
+    test.check(!lpl::infer::tests::synthesiseParityModelOver(arena, turnStartOnly, lpl::infer::ChatFormat::ChatMl,
+                                                             lpl::infer::parityModelConfig().contextLength, derived) &&
+                   !derived.ready(),
+               "nor can a model a seed derives over a vocabulary without <|im_end|> be ChatML");
 }
