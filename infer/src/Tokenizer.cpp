@@ -507,23 +507,26 @@ template <core::u32 Bytes>
 
 /**
  * @class TurnWriter
- * @brief Writes a turn's tokens and texts into the room it has, and knows when the turn did not fit.
+ * @brief Writes a turn's tokens and texts into the room it has, and knows when the turn did not fit or a text holds a
+ *        turn token.
  *
  * A text the room cut short fills it, and the turn token after it then finds no room. The last text of a turn has no
  * token after it, so it is encoded apart first, then written token by token.
  */
 class TurnWriter {
 public:
-    TurnWriter(const Tokenizer &tokenizer, core::u32 *out, core::u32 capacity) noexcept
-        : _tokenizer(tokenizer), _out(out), _capacity(capacity)
+    TurnWriter(const Tokenizer &tokenizer, const ChatTokens &tokens, core::u32 *out, core::u32 capacity) noexcept
+        : _tokenizer(tokenizer), _tokens(tokens), _out(out), _capacity(capacity)
     {
     }
 
     void token(core::u32 id) noexcept
     {
-        if (_outOfRoom || _written == _capacity)
+        if (_verdict != ChatTurnVerdict::Encoded)
+            return;
+        if (_written == _capacity)
         {
-            _outOfRoom = true;
+            _verdict = ChatTurnVerdict::OutOfRoom;
             return;
         }
         _out[_written++] = id;
@@ -531,37 +534,54 @@ public:
 
     void text(const char *bytes, core::u32 count) noexcept
     {
-        if (_outOfRoom)
+        if (_verdict != ChatTurnVerdict::Encoded)
             return;
+        const core::u32 first = _written;
         core::u32 skipped = 0u;
         _written += _tokenizer.encode(bytes, count, _out + _written, _capacity - _written, skipped);
         _skipped += skipped;
+        refuseTurnTokensFrom(first);
     }
 
     void lastText(const char *bytes, core::u32 count) noexcept
     {
-        if (_outOfRoom)
+        if (_verdict != ChatTurnVerdict::Encoded)
             return;
+        const core::u32 first = _written;
         core::u32 tokens[kChatMlAssistantOpeningBytes]{};
         core::u32 skipped = 0u;
         const core::u32 encoded = _tokenizer.encode(bytes, count, tokens, kChatMlAssistantOpeningBytes, skipped);
         _skipped += skipped;
         for (core::u32 at = 0u; at < encoded; ++at)
             token(tokens[at]);
+        refuseTurnTokensFrom(first);
     }
 
-    [[nodiscard]] ChatTurnReport report() const noexcept
-    {
-        return ChatTurnReport{_outOfRoom ? ChatTurnVerdict::OutOfRoom : ChatTurnVerdict::Encoded, _written, _skipped};
-    }
+    [[nodiscard]] ChatTurnReport report() const noexcept { return ChatTurnReport{_verdict, _written, _skipped}; }
 
 private:
+    [[nodiscard]] bool isTurnToken(core::u32 id) const noexcept
+    {
+        return id == _tokens.turnStart || id == _tokens.turnEnd || id == _tokens.endOfText;
+    }
+
+    void refuseTurnTokensFrom(core::u32 first) noexcept
+    {
+        for (core::u32 at = first; at < _written; ++at)
+            if (isTurnToken(_out[at]))
+            {
+                _verdict = ChatTurnVerdict::TurnTokenInText;
+                return;
+            }
+    }
+
     const Tokenizer &_tokenizer;
+    const ChatTokens &_tokens;
     core::u32 *_out;
     core::u32 _capacity;
     core::u32 _written{0u};
     core::u32 _skipped{0u};
-    bool _outOfRoom{false};
+    ChatTurnVerdict _verdict{ChatTurnVerdict::Encoded};
 };
 
 } // namespace
@@ -802,11 +822,12 @@ ChatTurnReport encodeChatTurn(TensorArena &scratch, const Tokenizer &tokenizer, 
                               const char *system, core::u32 systemBytes, const char *user, core::u32 userBytes,
                               core::u32 *out, core::u32 capacity) noexcept
 {
-    if (tokens.format != ChatFormat::ChatMl || tokens.turnStart == kNoToken || tokens.turnEnd == kNoToken ||
-        tokenizer.vocab() == nullptr)
+    if (tokenizer.vocab() == nullptr)
+        return ChatTurnReport{ChatTurnVerdict::UnboundTokenizer, 0u, 0u};
+    if (tokens.format != ChatFormat::ChatMl || tokens.turnStart == kNoToken || tokens.turnEnd == kNoToken)
         return ChatTurnReport{ChatTurnVerdict::NoTurns, 0u, 0u};
     if ((system == nullptr && systemBytes != 0u) || (user == nullptr && userBytes != 0u))
-        return ChatTurnReport{ChatTurnVerdict::ArenaExhausted, 0u, 0u};
+        return ChatTurnReport{ChatTurnVerdict::NullMessage, 0u, 0u};
 
     const core::u64 systemTurn = static_cast<core::u64>(literalBytes(kChatMlSystemRole)) + systemBytes;
     const core::u64 userTurn = static_cast<core::u64>(literalBytes(kChatMlUserRole)) + userBytes;
@@ -815,7 +836,7 @@ ChatTurnReport encodeChatTurn(TensorArena &scratch, const Tokenizer &tokenizer, 
     if (text == nullptr)
         return ChatTurnReport{ChatTurnVerdict::ArenaExhausted, 0u, 0u};
 
-    TurnWriter writer{tokenizer, out, out != nullptr ? capacity : 0u};
+    TurnWriter writer{tokenizer, tokens, out, out != nullptr ? capacity : 0u};
     writer.token(tokens.turnStart);
     writer.text(text, joinRoleAndContent(text, kChatMlSystemRole, system, systemBytes));
     writer.token(tokens.turnEnd);

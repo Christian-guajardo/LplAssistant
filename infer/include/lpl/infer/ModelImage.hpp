@@ -45,8 +45,8 @@ namespace lpl::infer {
  * 0.4.0 and 0.5.0 wrote this layout as 2, a number left from the one it replaced. That retired layout said 1 too, and
  * fails as a bad header: its width stands where this header gives its own size, and its heads where the flags are 0.
  * An image of LplAssistant 0.6.2 or before has a header of 64 bytes, without the merge count, the pre-tokenizer and the
- * key/value heads, and fails as a bad header too, as does one of 76 bytes, without the chat format, which
- * LplAssistant wrote from #114 to #116.
+ * key/value heads, and fails as a bad header too; so do one of 72 bytes, without the key/value heads, which
+ * LplAssistant#114 wrote, and one of 76 bytes, without the chat format, which LplAssistant#116 wrote.
  */
 inline constexpr core::u32 kModelImageVersion = 1u;
 

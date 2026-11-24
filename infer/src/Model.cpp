@@ -514,9 +514,6 @@ void viewExpert(const core::u8 *&cursor, const ModelConfig &shape, LayerWeights 
     viewMatrix(cursor, shape.dim, shape.ffnHidden, out.down);
 }
 
-/** The one-based entry of an image's vocabulary, which a refusal of its turn tokens names. */
-constexpr core::u32 kVocabularyEntry = 1u;
-
 /**
  * @struct ImageWeights
  * @brief What a reading has taken so far, adopted by the model once every segment is read.
@@ -725,6 +722,7 @@ ModelReadReport Model::readImage(TensorArena &arena, const core::u8 *bytes, core
         return ModelReadReport{ModelReadVerdict::ImageRefused, inspection.verdict, inspection.segment};
 
     ImageWeights weights{};
+    ChatTokens chatTokens{};
     weights.layers = arena.claim<LayerWeights>(inspection.header.shape.layers);
     if (weights.layers == nullptr)
         return ModelReadReport{ModelReadVerdict::ArenaExhausted, ModelImageVerdict::Accepted, 0u};
@@ -740,11 +738,10 @@ ModelReadReport Model::readImage(TensorArena &arena, const core::u8 *bytes, core
                                           copySegment(arena, bytes, segment, inspection.header, weights);
         if (read != ModelReadVerdict::Read)
             return ModelReadReport{read, ModelImageVerdict::Accepted, index + 1u};
+        if (segment.role == ModelSegmentRole::Vocabulary &&
+            !findChatTokens(inspection.header.chatFormat, weights.vocab, chatTokens))
+            return ModelReadReport{ModelReadVerdict::ChatTokensMissing, ModelImageVerdict::Accepted, index + 1u};
     }
-
-    ChatTokens chatTokens{};
-    if (!findChatTokens(inspection.header.chatFormat, weights.vocab, chatTokens))
-        return ModelReadReport{ModelReadVerdict::ChatTokensMissing, ModelImageVerdict::Accepted, kVocabularyEntry};
 
     _config = inspection.header.shape;
     _vocab = weights.vocab;

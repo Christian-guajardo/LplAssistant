@@ -13,7 +13,8 @@
  *
  * A model chooses how messages are put in its turns (ChatFormat), as it chooses its pre-tokenizer. The tokens that open
  * and close a turn are found by their text in its own vocabulary, so their ids are written nowhere else; a turn token
- * only ever comes from the format, never from the text of a message.
+ * only ever comes from the format, never from the text of a message, which encodeChatTurn refuses when the vocabulary
+ * would read it as one.
  *
  * @author MasterLaplace
  * @version 0.1.0
@@ -320,10 +321,13 @@ private:
  * @brief What putting messages in a model's turns found.
  */
 enum class ChatTurnVerdict : core::u32 {
-    Encoded = 0u,        ///< Every token of the turn is written.
-    NoTurns = 1u,        ///< The tokens are a Plain model's: there is no turn, and nothing is written.
-    ArenaExhausted = 2u, ///< The arena cannot hold a turn's text: its role, a newline and its content.
-    OutOfRoom = 3u,      ///< The turn holds more tokens than the room; the room holds its first ones.
+    Encoded = 0u,          ///< Every token of the turn is written.
+    NoTurns = 1u,          ///< The tokens are a Plain model's: there is no turn, and nothing is written.
+    ArenaExhausted = 2u,   ///< The arena cannot hold a turn's text: its role, a newline and its content.
+    OutOfRoom = 3u,        ///< The turn holds more tokens than the room; the room holds its first ones.
+    TurnTokenInText = 4u,  ///< A text of the turn, a message's, encodes to a turn token: it would close or open a turn.
+    NullMessage = 5u,      ///< A message is null but claims bytes: a caller's error.
+    UnboundTokenizer = 6u, ///< The tokenizer is bound to no vocabulary: a caller's error.
 };
 
 /**
@@ -339,13 +343,15 @@ struct ChatTurnReport {
 /**
  * @brief Puts a system message and a user message in the model's turns, then opens the assistant's turn.
  *
- * ChatMl writes `<|im_start|>` system, newline, @p system, `<|im_end|>`, newline, `<|im_start|>` user, newline, @p
- * user,
- * `<|im_end|>`, newline, then `<|im_start|>` assistant and a newline: the ids SmolLM2's own chat template gives the
- * messages [system, user] with add_generation_prompt. Each text between two turn tokens is encoded whole, as Hugging
- * Face encodes it: a turn's role, its newline and its content are one text, so the pre-tokenizer sees a newline and
- * the spaces after it together. A turn token only comes from the format: a message that holds the text `<|im_end|>`
- * keeps it as text, encoded by the merges like any other, where Hugging Face would close the turn there.
+ * ChatMl writes, for the system message then the user message, `<|im_start|>`, the role, a newline, the message,
+ * `<|im_end|>` and a newline, then `<|im_start|>`, assistant and a newline: the ids SmolLM2's own chat template gives
+ * the messages [system, user] with add_generation_prompt. Each text between two turn tokens is encoded whole, as
+ * Hugging Face encodes it: a turn's role, its newline and its content are one text, so the pre-tokenizer sees a newline
+ * and the spaces after it together.
+ *
+ * A turn token only comes from the format. Merged as SmolLM2's merges merge it, a message that holds the text
+ * `<|im_end|>` keeps it as text, where Hugging Face would close the turn there. A vocabulary that reads such a text as
+ * the token itself, as longest match does, has the turn refused as TurnTokenInText rather than closed early.
  *
  * @param scratch     Storage for one turn's text at a time, as long as a role, a newline and the longer message; the
  *                    caller reclaims it.
@@ -357,9 +363,9 @@ struct ChatTurnReport {
  * @param userBytes   How many.
  * @param out         Receives the turn's identifiers.
  * @param capacity    Room in @p out.
- * @return Encoded; otherwise why the turn is not whole: NoTurns for a Plain model's tokens or a tokenizer bound to no
- *         vocabulary; ArenaExhausted, as for a null message with bytes, a caller's error; OutOfRoom, the room holding
- *         the turn's first tokens.
+ * @return Encoded; otherwise why the turn is not had: NoTurns for a Plain model's tokens, ArenaExhausted, OutOfRoom
+ *         with the turn's first tokens written, TurnTokenInText, or the caller's errors NullMessage and
+ *         UnboundTokenizer.
  */
 [[nodiscard]] ChatTurnReport encodeChatTurn(TensorArena &scratch, const Tokenizer &tokenizer, const ChatTokens &tokens,
                                             const char *system, core::u32 systemBytes, const char *user,

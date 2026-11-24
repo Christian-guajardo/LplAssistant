@@ -54,7 +54,10 @@ namespace lpl::mind {
 /// Actions one step's grammar may offer. The alphabet is regenerated, so it stays small.
 inline constexpr core::u32 kMaxLegalPhrases = 16u;
 
-/// Bytes of prompt fed before a decision.
+/**
+ * Bytes of the goal a model without turns is fed before a decision: few, because the parity window is thirty-two
+ * positions and the answer has to fit in it beside the question.
+ */
 inline constexpr core::u32 kReasoningPromptBytes = 12u;
 
 /**
@@ -91,9 +94,10 @@ public:
      * @param persistent Storage for the inference façade and the tokenizer; never reset here.
      * @param scratch    Storage for per-step grammars and chat turns; reset on every decision.
      * @param model      The weights.
-     * @param vocab      The model's token table, the one its merges are indexed against.
+     * @param vocab      The model's own token table, model.vocab(), which its merges and turn tokens are numbered
+     *                   against.
      * @param seed       Sampler stream seed.
-     * @return false when the model is unbuilt or an arena is exhausted.
+     * @return false when the model is unbuilt, @p vocab is not its own table or an arena is exhausted.
      */
     bool initialise(infer::TensorArena &persistent, infer::TensorArena &scratch, const infer::Model &model,
                     const infer::Vocab &vocab, core::u32 seed) noexcept;
@@ -136,6 +140,26 @@ public:
      */
     [[nodiscard]] core::u32 chatTurns() const noexcept { return _chatTurns; }
 
+    /**
+     * @brief Decisions a model with turns left to the rule because their turn could not be had: out of room, the
+     *        scratch arena short, or a goal whose text the vocabulary reads as a turn token.
+     * @return The count.
+     */
+    [[nodiscard]] core::u32 chatTurnsRefused() const noexcept { return _chatTurnsRefused; }
+
+    /**
+     * @brief Tokens fed to the model as prompts across the session, one forward pass each before a decision generates.
+     * @return The count.
+     */
+    [[nodiscard]] core::u32 promptTokensFed() const noexcept { return _promptTokensFed; }
+
+    /**
+     * @brief Bytes of the prompts' texts no token of the vocabulary spells, dropped before the model saw them: the
+     *        goal's and, in a chat turn, the system message's and the turn's own.
+     * @return The count.
+     */
+    [[nodiscard]] core::u32 promptBytesSkipped() const noexcept { return _promptBytesSkipped; }
+
 private:
     [[nodiscard]] bool encodeGoal(const agent::DecisionContext &context, core::u32 *out, core::u32 &count) noexcept;
 
@@ -151,6 +175,9 @@ private:
     core::u32 _completions{0u};
     core::u32 _tokensGenerated{0u};
     core::u32 _chatTurns{0u};
+    core::u32 _chatTurnsRefused{0u};
+    core::u32 _promptTokensFed{0u};
+    core::u32 _promptBytesSkipped{0u};
     bool _ready{false};
 };
 

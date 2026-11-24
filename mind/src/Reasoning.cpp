@@ -54,6 +54,14 @@ bool alreadyTaken(const agent::Act *transcript, core::u32 count, const char *tex
     return false;
 }
 
+/**
+ * @brief Whether @p left and @p right are views of one table: the same text, the same entries, as many tokens.
+ */
+bool isTheSameTable(const infer::Vocab &left, const infer::Vocab &right) noexcept
+{
+    return left.blob() == right.blob() && left.entries() == right.entries() && left.size() == right.size();
+}
+
 } // namespace
 
 bool ModelReasoner::encodeGoal(const agent::DecisionContext &context, core::u32 *out, core::u32 &count) noexcept
@@ -64,6 +72,7 @@ bool ModelReasoner::encodeGoal(const agent::DecisionContext &context, core::u32 
         const core::u32 goalBytes =
             context.goalBytes < kReasoningPromptBytes ? context.goalBytes : kReasoningPromptBytes;
         count = _tokenizer.encode(context.goal, goalBytes, out, kReasoningPromptBytes, skipped);
+        _promptBytesSkipped += skipped;
         return true;
     }
 
@@ -72,7 +81,11 @@ bool ModelReasoner::encodeGoal(const agent::DecisionContext &context, core::u32 
         context.goalBytes, out, kReasoningChatTurnTokens);
     count = turn.tokens;
     if (turn.verdict != infer::ChatTurnVerdict::Encoded)
+    {
+        ++_chatTurnsRefused;
         return false;
+    }
+    _promptBytesSkipped += turn.skipped;
     ++_chatTurns;
     return true;
 }
@@ -89,11 +102,15 @@ bool ModelReasoner::initialise(infer::TensorArena &persistent, infer::TensorAren
     _completions = 0u;
     _tokensGenerated = 0u;
     _chatTurns = 0u;
+    _chatTurnsRefused = 0u;
+    _promptTokensFed = 0u;
+    _promptBytesSkipped = 0u;
 
     /* Refuse rather than slide when the window is full. A demon whose context quietly
        dropped its oldest positions would make one decision from a prompt and the next
        from a truncation of it, and nothing in the transcript would say so. */
-    _ready = _tokenizer.bind(persistent, vocab, model.merges(), model.preTokenizer()) &&
+    _ready = isTheSameTable(vocab, model.vocab()) &&
+             _tokenizer.bind(persistent, vocab, model.merges(), model.preTokenizer()) &&
              _inference.initialise(persistent, model, infer::CachePolicy::Refuse);
     return _ready;
 }
@@ -150,8 +167,7 @@ agent::Act ModelReasoner::decide(const agent::DecisionContext &context) noexcept
 
     /* The prompt ties the run to what was asked. It cannot make an untrained model
        competent — nothing can — so what it buys is that two different goals do not
-       decide from the same context. Short because the window is thirty-two positions
-       and the answer has to fit in it beside the question. */
+       decide from the same context. */
     core::u32 promptTokens[kReasoningChatTurnTokens]{};
     core::u32 promptCount = 0u;
     if (!encodeGoal(context, promptTokens, promptCount))
@@ -169,7 +185,10 @@ agent::Act ModelReasoner::decide(const agent::DecisionContext &context) noexcept
     core::u32 produced[kMaxDecisionTokens]{};
     infer::GenerationReport report{};
     ++_generations;
-    if (!_inference.generate(promptTokens, promptCount, params, &grammar, produced, kMaxDecisionTokens, report))
+    const bool generated =
+        _inference.generate(promptTokens, promptCount, params, &grammar, produced, kMaxDecisionTokens, report);
+    _promptTokensFed += report.promptTokens;
+    if (!generated)
         return _fallback.decide(context);
 
     _tokensGenerated += report.generated;
