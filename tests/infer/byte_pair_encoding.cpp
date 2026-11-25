@@ -729,9 +729,10 @@ LPL_TEST(an_image_carries_its_merges_and_pre_tokenizer)
     readFixture(arena, fixture);
     lpl::infer::ModelConfig shape = lpl::infer::parityModelConfig();
     shape.vocabSize = smollm2_byte_pairs::kTokenCount;
-    const bool synthesised = fixture.bound && model.synthesise(arena, shape, fixture.vocab, fixture.merges,
-                                                               lpl::infer::PreTokenizer::IndividualDigitsThenByteLevel,
-                                                               lpl::infer::parityModelSeed());
+    const bool synthesised =
+        fixture.bound && model.synthesise(arena, shape, fixture.vocab, fixture.merges,
+                                          lpl::infer::PreTokenizer::IndividualDigitsThenByteLevel,
+                                          lpl::infer::ChatFormat::Plain, lpl::infer::parityModelSeed());
     lpl::core::u8 *const image =
         synthesised ?
             lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size) :
@@ -790,9 +791,10 @@ LPL_TEST(an_image_whose_merges_or_pre_tokenizer_do_not_hold_is_refused)
     readFixture(arena, fixture);
     lpl::infer::ModelConfig shape = lpl::infer::parityModelConfig();
     shape.vocabSize = smollm2_byte_pairs::kTokenCount;
-    const bool synthesised = fixture.bound && model.synthesise(arena, shape, fixture.vocab, fixture.merges,
-                                                               lpl::infer::PreTokenizer::IndividualDigitsThenByteLevel,
-                                                               lpl::infer::parityModelSeed());
+    const bool synthesised =
+        fixture.bound && model.synthesise(arena, shape, fixture.vocab, fixture.merges,
+                                          lpl::infer::PreTokenizer::IndividualDigitsThenByteLevel,
+                                          lpl::infer::ChatFormat::Plain, lpl::infer::parityModelSeed());
     lpl::core::u8 *const image =
         synthesised ?
             lpl::infer::tests::writeModelImage(arena, model, lpl::infer::kModelImageDefaultAlignmentLog2, 0u, size) :

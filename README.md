@@ -21,11 +21,13 @@ serveur. La frontière est celle que le projet trace déjà entre `editor/` et
 | `voice/` | freestanding | distinguer les membres d'un foyer à l'oreille |
 | `research/` | hôte | deep research, exposé comme **bibliothèque d'outils** (pas un binaire) |
 | `backend/` | hôte | moteur d'inférence, base vectorielle, audio, protocole d'agents |
+| `convert/` | hôte | un modèle GGUF changé en image `.lplmind` v1 que le ring 0 exécute, et comparé à llama.cpp |
 
 ```
 apps/laplace     REPL / --ask / --wav / --listen (UDP)
 apps/satellite   nœud micro + haut-parleur local (option `satellite`)
 apps/speech      transcription, dans son propre espace d'adressage (option `stt`)
+apps/convert     lpl-convert : un GGUF en image .lplmind (convert), et sa comparaison avec llama.cpp (agree)
 ```
 
 Le STT vit dans un binaire séparé, et `backend/` **exclut** `SpeechInput.cpp` de sa
@@ -51,6 +53,26 @@ n'utilise ni l'un ni l'autre. Warnings `allextra` **+ erreur**, et zéro warning
 | LLM | qwen2.5-1.5b-instruct-q4_k_m.gguf | ~1 Go |
 | Embeddings | bge-m3-q4_k_m.gguf | ~420 Mo |
 | STT | ggml-base.bin (whisper base) | ~142 Mo |
+
+### Une image pour le ring 0 (`lpl-convert`)
+
+Le GGUF se construit depuis les poids officiels de SmolLM2-135M-Instruct, épinglés par SHA-256, avec le convertisseur
+de llama.cpp b3775 lui-même :
+
+```sh
+uv run --no-project --with clang-format==18.1.3 python -I tools/gguf_reference.py gguf
+xmake f -m release && xmake build lpl-convert
+G=~/.cache/lplassistant/gguf-reference/smollm2-135m-instruct-12fd25f-gguf/smollm2-135m-instruct-bf16.gguf
+./build/linux/x86_64/release/lpl-convert convert $G smollm2.lplmind --context 2048
+./build/linux/x86_64/release/lpl-convert agree $G smollm2.lplmind
+```
+
+`lpl-convert --help` dit chaque commande et chaque enregistrement ; les refus sont nommés dans
+`convert/include/lpl/convert/Converter.hpp` et `ModelFile.hpp`. Les deux commandes ne lisent qu'un GGUF d'une chaîne
+de confiance : le parseur de ggml b3775 arrête le processus sur certains fichiers malformés. `lpl-convert` se lie à la
+libcrypto d'OpenSSL, pour les SHA-256 qu'il imprime, et prend ses séquences de comparaison dans la fixture
+`tests/infer/fixtures/smollm2_byte_pairs.hpp`. Les tests du convertisseur, `xmake run test-convert`, tournent sur des
+modèles qu'ils construisent, et dans aucune CI de ce dépôt pour l'instant.
 
 ## Build autonome
 

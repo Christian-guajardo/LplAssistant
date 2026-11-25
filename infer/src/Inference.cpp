@@ -34,8 +34,7 @@ bool Inference::initialise(TensorArena &arena, const Model &model, CachePolicy p
 }
 
 bool Inference::generate(const core::u32 *prompt, core::u32 promptCount, const GenerationParams &params,
-                         const Grammar *grammar, core::u32 *out, core::u32 capacity,
-                         GenerationReport &report) noexcept
+                         const Grammar *grammar, core::u32 *out, core::u32 capacity, GenerationReport &report) noexcept
 {
     report = GenerationReport{};
     if (_model == nullptr || out == nullptr)
@@ -64,6 +63,7 @@ bool Inference::generate(const core::u32 *prompt, core::u32 promptCount, const G
     if (promptCount == 0u)
         return false;
 
+    const ChatTokens &chat = _model->chatTokens();
     const core::u32 ceiling = params.maxTokens < capacity ? params.maxTokens : capacity;
     while (report.generated < ceiling)
     {
@@ -83,6 +83,11 @@ bool Inference::generate(const core::u32 *prompt, core::u32 promptCount, const G
         if (token == kNoToken)
         {
             report.grammarExhausted = grammar != nullptr;
+            break;
+        }
+        if (chat.endsTurn(token))
+        {
+            report.endOfTurn = true;
             break;
         }
 

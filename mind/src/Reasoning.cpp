@@ -49,30 +49,69 @@ constexpr bool same(const char *left, core::u32 leftBytes, const char *right, co
 bool alreadyTaken(const agent::Act *transcript, core::u32 count, const char *text, core::u32 bytes) noexcept
 {
     for (core::u32 i = 0u; i < count; ++i)
-        if (transcript[i].kind == agent::ActKind::Action &&
-            same(transcript[i].text, transcript[i].bytes, text, bytes))
+        if (transcript[i].kind == agent::ActKind::Action && same(transcript[i].text, transcript[i].bytes, text, bytes))
             return true;
     return false;
 }
 
+/**
+ * @brief Whether @p left and @p right are views of one table: the same text, the same entries, as many tokens.
+ */
+bool isTheSameTable(const infer::Vocab &left, const infer::Vocab &right) noexcept
+{
+    return left.blob() == right.blob() && left.entries() == right.entries() && left.size() == right.size();
+}
+
 } // namespace
+
+bool ModelReasoner::encodeGoal(const agent::DecisionContext &context, core::u32 *out, core::u32 &count) noexcept
+{
+    core::u32 skipped = 0u;
+    if (_chatTokens.format == infer::ChatFormat::Plain)
+    {
+        const core::u32 goalBytes =
+            context.goalBytes < kReasoningPromptBytes ? context.goalBytes : kReasoningPromptBytes;
+        count = _tokenizer.encode(context.goal, goalBytes, out, kReasoningPromptBytes, skipped);
+        _promptBytesSkipped += skipped;
+        return true;
+    }
+
+    const infer::ChatTurnReport turn = infer::encodeChatTurn(
+        *_scratch, _tokenizer, _chatTokens, kReasoningSystemMessage, sizeof(kReasoningSystemMessage) - 1u, context.goal,
+        context.goalBytes, out, kReasoningChatTurnTokens);
+    count = turn.tokens;
+    if (turn.verdict != infer::ChatTurnVerdict::Encoded)
+    {
+        ++_chatTurnsRefused;
+        return false;
+    }
+    _promptBytesSkipped += turn.skipped;
+    ++_chatTurns;
+    return true;
+}
 
 bool ModelReasoner::initialise(infer::TensorArena &persistent, infer::TensorArena &scratch, const infer::Model &model,
                                const infer::Vocab &vocab, core::u32 seed) noexcept
 {
     _scratch = &scratch;
-    _vocab = &vocab;
+    _chatTokens = model.chatTokens();
     _seed = seed;
     _generations = 0u;
     _illegalActions = 0u;
     _grammarExhausted = 0u;
     _completions = 0u;
     _tokensGenerated = 0u;
+    _chatTurns = 0u;
+    _chatTurnsRefused = 0u;
+    _promptTokensFed = 0u;
+    _promptBytesSkipped = 0u;
 
     /* Refuse rather than slide when the window is full. A demon whose context quietly
        dropped its oldest positions would make one decision from a prompt and the next
        from a truncation of it, and nothing in the transcript would say so. */
-    _ready = _inference.initialise(persistent, model, infer::CachePolicy::Refuse);
+    _ready = isTheSameTable(vocab, model.vocab()) &&
+             _tokenizer.bind(persistent, vocab, model.merges(), model.preTokenizer()) &&
+             _inference.initialise(persistent, model, infer::CachePolicy::Refuse);
     return _ready;
 }
 
@@ -128,14 +167,11 @@ agent::Act ModelReasoner::decide(const agent::DecisionContext &context) noexcept
 
     /* The prompt ties the run to what was asked. It cannot make an untrained model
        competent — nothing can — so what it buys is that two different goals do not
-       decide from the same context. Short because the window is thirty-two positions
-       and the answer has to fit in it beside the question. */
-    core::u32 promptTokens[kReasoningPromptBytes]{};
-    core::u32 skipped = 0u;
-    const infer::Tokenizer tokenizer{*_vocab};
-    const core::u32 promptBytes = context.goalBytes < kReasoningPromptBytes ? context.goalBytes : kReasoningPromptBytes;
-    const core::u32 promptCount =
-        tokenizer.encode(context.goal, promptBytes, promptTokens, kReasoningPromptBytes, skipped);
+       decide from the same context. */
+    core::u32 promptTokens[kReasoningChatTurnTokens]{};
+    core::u32 promptCount = 0u;
+    if (!encodeGoal(context, promptTokens, promptCount))
+        return _fallback.decide(context);
 
     infer::GenerationParams params;
     params.sampler.topK = 8u;
@@ -149,7 +185,10 @@ agent::Act ModelReasoner::decide(const agent::DecisionContext &context) noexcept
     core::u32 produced[kMaxDecisionTokens]{};
     infer::GenerationReport report{};
     ++_generations;
-    if (!_inference.generate(promptTokens, promptCount, params, &grammar, produced, kMaxDecisionTokens, report))
+    const bool generated =
+        _inference.generate(promptTokens, promptCount, params, &grammar, produced, kMaxDecisionTokens, report);
+    _promptTokensFed += report.promptTokens;
+    if (!generated)
         return _fallback.decide(context);
 
     _tokensGenerated += report.generated;
@@ -162,7 +201,7 @@ agent::Act ModelReasoner::decide(const agent::DecisionContext &context) noexcept
     agent::Act act;
     act.kind = agent::ActKind::Action;
     act.step = context.turn;
-    act.bytes = tokenizer.decode(produced, report.generated, act.text, agent::kActBytes);
+    act.bytes = _tokenizer.decode(produced, report.generated, act.text, agent::kActBytes);
 
     /* Checked against the language it was generated from. This should be impossible to
        fail, which is exactly why it is measured: a grammar that had stopped

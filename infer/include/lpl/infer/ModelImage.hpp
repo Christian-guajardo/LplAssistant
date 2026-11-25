@@ -2,7 +2,7 @@
  * @file ModelImage.hpp
  * @brief The layout of a `.lplmind` image, laid out for paging.
  *
- * An image opens on a header of 76 bytes and the table of its segments, so that whoever maps it reads
+ * An image opens on a header of 80 bytes and the table of its segments, so that whoever maps it reads
  * where every segment lies without touching a page that is not mapped yet. The resident segments (the
  * vocabulary, the embedding, each layer's attention, the final norm and the rotary table) follow the table, 64-byte
  * aligned; each expert, a layer's feed-forward matrices one after the other, starts on a boundary of the image's
@@ -19,7 +19,7 @@
  * All words are little-endian. The header: magic, version, header bytes, alignment as a power of two, flags,
  * segment count, the image's bytes on 64 bits, the shape (dim, layers, heads, feed-forward width, context,
  * vocabulary size), the vocabulary's text bytes, the norm's epsilon in units of 2^-32, the merge count, the
- * pre-tokenizer (PreTokenizer), the key/value heads. A segment: role, residency,
+ * pre-tokenizer (PreTokenizer), the key/value heads, the chat format (ChatFormat). A segment: role, residency,
  * layer and expert one-based (0 for none), offset and length on 64 bits, FNV-1a signature, a reserved word.
  *
  * @author MasterLaplace
@@ -45,12 +45,13 @@ namespace lpl::infer {
  * 0.4.0 and 0.5.0 wrote this layout as 2, a number left from the one it replaced. That retired layout said 1 too, and
  * fails as a bad header: its width stands where this header gives its own size, and its heads where the flags are 0.
  * An image of LplAssistant 0.6.2 or before has a header of 64 bytes, without the merge count, the pre-tokenizer and the
- * key/value heads, and fails as a bad header too.
+ * key/value heads, and fails as a bad header too; so do one of 72 bytes, without the key/value heads, which
+ * LplAssistant#114 wrote, and one of 76 bytes, without the chat format, which LplAssistant#116 wrote.
  */
 inline constexpr core::u32 kModelImageVersion = 1u;
 
 /** Bytes of a header. */
-inline constexpr core::u32 kModelImageHeaderBytes = 76u;
+inline constexpr core::u32 kModelImageHeaderBytes = 80u;
 
 /** Bytes of one entry of the segment table. */
 inline constexpr core::u32 kModelSegmentEntryBytes = 40u;
@@ -117,6 +118,7 @@ struct ModelImageHeader {
     core::u32 vocabTextBytes{0u}; ///< Bytes of the vocabulary's text.
     core::u32 mergeCount{0u};     ///< Ranked merges; 0 for a vocabulary segmented by longest match.
     PreTokenizer preTokenizer{PreTokenizer::WholeText}; ///< How text splits before it is segmented.
+    ChatFormat chatFormat{ChatFormat::Plain};           ///< How messages are put in the model's turns.
 };
 
 /**
@@ -148,6 +150,7 @@ enum class ModelImageVerdict : core::u32 {
     SegmentOverlaps = 12u,     ///< Starts before the table or the segment before it ends.
     SegmentOutside = 13u,      ///< Ends past the image.
     UnknownPreTokenizer = 14u, ///< A pre-tokenizer this reader does not know.
+    UnknownChatFormat = 15u,   ///< A chat format this reader does not know.
 };
 
 /**
@@ -261,8 +264,8 @@ void writeModelSegmentEntry(core::u8 *image, core::u32 index, const ModelSegment
  * @param verdict A verdict.
  * @return "accepted", "too_short", "bad_magic", "unknown_version", "bad_header", "bad_alignment", "bad_shape",
  *         "bad_image_bytes", "bad_segment_count", "segment_unexpected", "segment_wrong_length",
- *         "segment_misaligned", "segment_overlaps", "segment_outside" or "unknown_pre_tokenizer"; "unknown"
- *         otherwise.
+ *         "segment_misaligned", "segment_overlaps", "segment_outside", "unknown_pre_tokenizer" or
+ *         "unknown_chat_format"; "unknown" otherwise.
  */
 [[nodiscard]] const char *modelImageVerdictName(ModelImageVerdict verdict) noexcept;
 

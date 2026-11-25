@@ -453,6 +453,136 @@ core::u32 mergeWord(MergeWorkspace &work, core::u32 count, const BytePairMerges 
     return written;
 }
 
+/**
+ * @name The texts of a ChatML turn
+ * @{
+ */
+constexpr char kChatMlTurnStart[] = "<|im_start|>";
+constexpr char kChatMlTurnEnd[] = "<|im_end|>";
+constexpr char kChatMlEndOfText[] = "<|endoftext|>";
+constexpr char kChatMlSystemRole[] = "system\n";
+constexpr char kChatMlUserRole[] = "user\n";
+constexpr char kChatMlBetweenTurns[] = "\n";
+constexpr char kChatMlAssistantOpening[] = "assistant\n";
+/** @} */
+
+/** Bytes of the assistant's opening, and the most tokens it can encode to: one per byte. */
+constexpr core::u32 kChatMlAssistantOpeningBytes = sizeof(kChatMlAssistantOpening) - 1u;
+
+/** The longest turn's text, its role, newline and content, that Tokenizer::encode takes: 32 bits of bytes. */
+constexpr core::u64 kMostTurnTextBytes = 0xFFFFFFFFull;
+
+/**
+ * @brief Bytes of a literal of @p Bytes, its terminator left out.
+ */
+template <core::u32 Bytes> [[nodiscard]] constexpr core::u32 literalBytes(const char (&)[Bytes]) noexcept
+{
+    return Bytes - 1u;
+}
+
+/**
+ * @brief The token of @p vocab whose text is the literal @p text, or kNoToken.
+ */
+template <core::u32 Bytes> [[nodiscard]] core::u32 tokenSpelling(const Vocab &vocab, const char (&text)[Bytes]) noexcept
+{
+    return vocab.find(text, literalBytes(text));
+}
+
+/**
+ * @brief Writes the literal @p role, then the @p contentBytes bytes of @p content, into @p text.
+ * @return The bytes written.
+ */
+template <core::u32 Bytes>
+[[nodiscard]] core::u32 joinRoleAndContent(char *text, const char (&role)[Bytes], const char *content,
+                                           core::u32 contentBytes) noexcept
+{
+    const core::u32 roleBytes = literalBytes(role);
+
+    for (core::u32 at = 0u; at < roleBytes; ++at)
+        text[at] = role[at];
+    for (core::u32 at = 0u; at < contentBytes; ++at)
+        text[roleBytes + at] = content[at];
+    return roleBytes + contentBytes;
+}
+
+/**
+ * @class TurnWriter
+ * @brief Writes a turn's tokens and texts into the room it has, and knows when the turn did not fit or a text holds a
+ *        turn token.
+ *
+ * A text the room cut short fills it, and the turn token after it then finds no room. The last text of a turn has no
+ * token after it, so it is encoded apart first, then written token by token; it is the format's own, the assistant's
+ * role and a newline, and holds no message.
+ */
+class TurnWriter {
+public:
+    TurnWriter(const Tokenizer &tokenizer, const ChatTokens &tokens, core::u32 *out, core::u32 capacity) noexcept
+        : _tokenizer(tokenizer), _tokens(tokens), _out(out), _capacity(capacity)
+    {
+    }
+
+    void token(core::u32 id) noexcept
+    {
+        if (_verdict != ChatTurnVerdict::Encoded)
+            return;
+        if (_written == _capacity)
+        {
+            _verdict = ChatTurnVerdict::OutOfRoom;
+            return;
+        }
+        _out[_written++] = id;
+    }
+
+    void text(const char *bytes, core::u32 count) noexcept
+    {
+        if (_verdict != ChatTurnVerdict::Encoded)
+            return;
+        const core::u32 first = _written;
+        core::u32 skipped = 0u;
+        _written += _tokenizer.encode(bytes, count, _out + _written, _capacity - _written, skipped);
+        _skipped += skipped;
+        refuseTurnTokensFrom(first);
+    }
+
+    void lastText(const char *bytes, core::u32 count) noexcept
+    {
+        if (_verdict != ChatTurnVerdict::Encoded)
+            return;
+        core::u32 tokens[kChatMlAssistantOpeningBytes]{};
+        core::u32 skipped = 0u;
+        const core::u32 encoded = _tokenizer.encode(bytes, count, tokens, kChatMlAssistantOpeningBytes, skipped);
+        _skipped += skipped;
+        for (core::u32 at = 0u; at < encoded; ++at)
+            token(tokens[at]);
+    }
+
+    [[nodiscard]] ChatTurnReport report() const noexcept { return ChatTurnReport{_verdict, _written, _skipped}; }
+
+private:
+    [[nodiscard]] bool isTurnToken(core::u32 id) const noexcept
+    {
+        return id == _tokens.turnStart || id == _tokens.turnEnd || id == _tokens.endOfText;
+    }
+
+    void refuseTurnTokensFrom(core::u32 first) noexcept
+    {
+        for (core::u32 at = first; at < _written; ++at)
+            if (isTurnToken(_out[at]))
+            {
+                _verdict = ChatTurnVerdict::TurnTokenInText;
+                return;
+            }
+    }
+
+    const Tokenizer &_tokenizer;
+    const ChatTokens &_tokens;
+    core::u32 *_out;
+    core::u32 _capacity;
+    core::u32 _written{0u};
+    core::u32 _skipped{0u};
+    ChatTurnVerdict _verdict{ChatTurnVerdict::Encoded};
+};
+
 } // namespace
 
 BytePairMergesVerdict BytePairMerges::borrow(TensorArena &arena, const BytePairMerge *merges, core::u32 count,
@@ -516,6 +646,27 @@ bool isKnownPreTokenizer(core::u32 value) noexcept
 {
     return value == static_cast<core::u32>(PreTokenizer::WholeText) ||
            value == static_cast<core::u32>(PreTokenizer::IndividualDigitsThenByteLevel);
+}
+
+bool isKnownChatFormat(core::u32 value) noexcept
+{
+    return value == static_cast<core::u32>(ChatFormat::Plain) || value == static_cast<core::u32>(ChatFormat::ChatMl);
+}
+
+bool findChatTokens(ChatFormat format, const Vocab &vocab, ChatTokens &out) noexcept
+{
+    out = ChatTokens{};
+    out.format = format;
+    switch (format)
+    {
+    case ChatFormat::Plain: return true;
+    case ChatFormat::ChatMl:
+        out.turnStart = tokenSpelling(vocab, kChatMlTurnStart);
+        out.turnEnd = tokenSpelling(vocab, kChatMlTurnEnd);
+        out.endOfText = tokenSpelling(vocab, kChatMlEndOfText);
+        return out.turnStart != kNoToken && out.turnEnd != kNoToken;
+    }
+    return false;
 }
 
 CharacterClass characterClassOf(core::u32 codePoint) noexcept
@@ -664,6 +815,38 @@ core::u32 Tokenizer::decode(const core::u32 *tokens, core::u32 count, char *out,
             out[written++] = bytes[b];
     }
     return written;
+}
+
+ChatTurnReport encodeChatTurn(TensorArena &scratch, const Tokenizer &tokenizer, const ChatTokens &tokens,
+                              const char *system, core::u32 systemBytes, const char *user, core::u32 userBytes,
+                              core::u32 *out, core::u32 capacity) noexcept
+{
+    if (tokenizer.vocab() == nullptr)
+        return ChatTurnReport{ChatTurnVerdict::UnboundTokenizer, 0u, 0u};
+    if (tokens.format != ChatFormat::ChatMl || tokens.turnStart == kNoToken || tokens.turnEnd == kNoToken)
+        return ChatTurnReport{ChatTurnVerdict::NoTurns, 0u, 0u};
+    if ((system == nullptr && systemBytes != 0u) || (user == nullptr && userBytes != 0u))
+        return ChatTurnReport{ChatTurnVerdict::NullMessage, 0u, 0u};
+
+    const core::u64 systemTurn = static_cast<core::u64>(literalBytes(kChatMlSystemRole)) + systemBytes;
+    const core::u64 userTurn = static_cast<core::u64>(literalBytes(kChatMlUserRole)) + userBytes;
+    const core::u64 longest = systemTurn > userTurn ? systemTurn : userTurn;
+    char *const text = longest <= kMostTurnTextBytes ? scratch.claim<char>(static_cast<core::usize>(longest)) : nullptr;
+    if (text == nullptr)
+        return ChatTurnReport{ChatTurnVerdict::ArenaExhausted, 0u, 0u};
+
+    TurnWriter writer{tokenizer, tokens, out, out != nullptr ? capacity : 0u};
+    writer.token(tokens.turnStart);
+    writer.text(text, joinRoleAndContent(text, kChatMlSystemRole, system, systemBytes));
+    writer.token(tokens.turnEnd);
+    writer.text(kChatMlBetweenTurns, literalBytes(kChatMlBetweenTurns));
+    writer.token(tokens.turnStart);
+    writer.text(text, joinRoleAndContent(text, kChatMlUserRole, user, userBytes));
+    writer.token(tokens.turnEnd);
+    writer.text(kChatMlBetweenTurns, literalBytes(kChatMlBetweenTurns));
+    writer.token(tokens.turnStart);
+    writer.lastText(kChatMlAssistantOpening, literalBytes(kChatMlAssistantOpening));
+    return writer.report();
 }
 
 } // namespace lpl::infer
