@@ -643,6 +643,126 @@ void writeSegment(core::u8 *at, const Model &model, const ModelSegment &segment)
     }
 }
 
+/** One-based entry of an image's vocabulary, and of the part that holds it in an assembly. */
+constexpr core::u32 kVocabularyEntry = 1u;
+
+/** One-based entry of an image's embedding. */
+constexpr core::u32 kEmbeddingEntry = 2u;
+
+/**
+ * @brief Whether @p matrix has blocks and is @p rows by @p columns.
+ */
+[[nodiscard]] bool matrixIs(const QuantMatrixView &matrix, core::u32 rows, core::u32 columns) noexcept
+{
+    return matrix.blocks != nullptr && matrix.rows == rows && matrix.columns == columns;
+}
+
+/**
+ * @brief Whether @p vector has values and holds @p count of them.
+ */
+[[nodiscard]] bool vectorIs(ConstVectorView vector, core::u32 count) noexcept
+{
+    return vector.values != nullptr && vector.count == count;
+}
+
+/**
+ * @brief Whether what a layer's attention segment holds, its two norms then its query, key, value and output matrices,
+ *        is of @p shape's extents.
+ */
+[[nodiscard]] bool attentionIs(const LayerWeights &layer, const ModelConfig &shape) noexcept
+{
+    return vectorIs(layer.attentionNorm, shape.dim) && vectorIs(layer.feedForwardNorm, shape.dim) &&
+           matrixIs(layer.query, shape.dim, shape.dim) && matrixIs(layer.key, shape.keyValueWidth(), shape.dim) &&
+           matrixIs(layer.value, shape.keyValueWidth(), shape.dim) && matrixIs(layer.output, shape.dim, shape.dim);
+}
+
+/**
+ * @brief Whether what a layer's expert segment holds, its gate, up and down matrices, is of @p shape's extents.
+ */
+[[nodiscard]] bool expertIs(const LayerWeights &layer, const ModelConfig &shape) noexcept
+{
+    return matrixIs(layer.gate, shape.ffnHidden, shape.dim) && matrixIs(layer.up, shape.ffnHidden, shape.dim) &&
+           matrixIs(layer.down, shape.dim, shape.ffnHidden);
+}
+
+/**
+ * @brief Whether @p rotary holds one word for each pair of @p shape's heads.
+ */
+[[nodiscard]] bool rotaryIs(RotaryFrequencies rotary, const ModelConfig &shape) noexcept
+{
+    return rotary.pairs == shape.rotaryPairs() && (rotary.pairs == 0u || rotary.turnsPerPosition != nullptr);
+}
+
+/**
+ * @brief The one-based entry of the first of @p parts, in the order of an image's segments, that is missing or not of
+ *        its shape's extents; 0 when every one is.
+ */
+[[nodiscard]] core::u32 misshapenEntry(const ModelParts &parts) noexcept
+{
+    const ModelConfig &shape = parts.shape;
+    const core::u32 layers = shape.layers;
+
+    if (parts.vocabularyText == nullptr || parts.vocabularyEntries == nullptr)
+        return kVocabularyEntry;
+    if (!matrixIs(parts.embedding, shape.vocabSize, shape.dim))
+        return kEmbeddingEntry;
+    if (parts.layers == nullptr)
+        return kEmbeddingEntry + 1u;
+    for (core::u32 l = 0u; l < layers; ++l)
+    {
+        if (!attentionIs(parts.layers[l], shape))
+            return kEmbeddingEntry + 1u + l;
+    }
+    if (!vectorIs(parts.finalNorm, shape.dim))
+        return layers + 3u;
+    if (!rotaryIs(parts.rotary, shape))
+        return layers + 4u;
+    for (core::u32 l = 0u; l < layers; ++l)
+    {
+        if (!expertIs(parts.layers[l], shape))
+            return layers + 5u + l;
+    }
+    if (parts.mergeCount != 0u && parts.merges == nullptr)
+        return modelImageSegmentCount(shape);
+    return 0u;
+}
+
+/**
+ * @brief What an image's header holding @p parts' shape, text, pre-tokenizer and chat format would be refused as, in
+ *        the order reading a header checks them; Accepted when it would hold.
+ */
+[[nodiscard]] ModelImageVerdict headerVerdictOf(const ModelParts &parts) noexcept
+{
+    if (!parts.shape.valid() || parts.vocabularyTextBytes == 0u)
+        return ModelImageVerdict::BadShape;
+    if (!isKnownPreTokenizer(static_cast<core::u32>(parts.preTokenizer)))
+        return ModelImageVerdict::UnknownPreTokenizer;
+    if (!isKnownChatFormat(static_cast<core::u32>(parts.chatFormat)))
+        return ModelImageVerdict::UnknownChatFormat;
+    return ModelImageVerdict::Accepted;
+}
+
+/**
+ * @brief Whether every one of @p count vocabulary entries holds inside @p textBytes of text, as reading takes them.
+ */
+[[nodiscard]] bool everyEntryHolds(const VocabEntry *entries, core::u32 count, core::u32 textBytes) noexcept
+{
+    for (core::u32 i = 0u; i < count; ++i)
+    {
+        if (!vocabularyEntryHolds(entries[i], textBytes))
+            return false;
+    }
+    return true;
+}
+
+/**
+ * @brief A refusal of an assembly, with @p verdict naming the one-based @p entry.
+ */
+[[nodiscard]] ModelReadReport assemblyRefused(ModelReadVerdict verdict, core::u32 entry) noexcept
+{
+    return ModelReadReport{verdict, ModelImageVerdict::Accepted, entry};
+}
+
 } // namespace
 
 bool Model::synthesise(TensorArena &arena, const ModelConfig &shape, const Vocab &vocab, core::u32 seed)
@@ -755,6 +875,42 @@ ModelReadReport Model::readImage(TensorArena &arena, const core::u8 *bytes, core
     return ModelReadReport{ModelReadVerdict::Read, ModelImageVerdict::Accepted, 0u};
 }
 
+ModelReadReport Model::assemble(TensorArena &arena, const ModelParts &parts)
+{
+    _layers = nullptr;
+    const ModelImageVerdict header = headerVerdictOf(parts);
+    if (header != ModelImageVerdict::Accepted)
+        return ModelReadReport{ModelReadVerdict::ImageRefused, header, 0u};
+    const core::u32 misshapen = misshapenEntry(parts);
+    if (misshapen != 0u)
+        return assemblyRefused(ModelReadVerdict::PartsMisshapen, misshapen);
+
+    const ModelConfig &shape = parts.shape;
+    if (!everyEntryHolds(parts.vocabularyEntries, shape.vocabSize, parts.vocabularyTextBytes))
+        return assemblyRefused(ModelReadVerdict::VocabularyRefused, kVocabularyEntry);
+    Vocab vocab{};
+    if (!vocab.borrow(arena, parts.vocabularyText, parts.vocabularyTextBytes, parts.vocabularyEntries, shape.vocabSize))
+        return assemblyRefused(ModelReadVerdict::ArenaExhausted, kVocabularyEntry);
+    ChatTokens chatTokens{};
+    if (!findChatTokens(parts.chatFormat, vocab, chatTokens))
+        return assemblyRefused(ModelReadVerdict::ChatTokensMissing, kVocabularyEntry);
+    BytePairMerges merges{};
+    const ModelReadVerdict indexed = mergesVerdict(merges.borrow(arena, parts.merges, parts.mergeCount, vocab));
+    if (indexed != ModelReadVerdict::Read)
+        return assemblyRefused(indexed, modelImageSegmentCount(shape));
+
+    _config = shape;
+    _vocab = vocab;
+    _merges = merges;
+    _preTokenizer = parts.preTokenizer;
+    _chatTokens = chatTokens;
+    _embedding = parts.embedding;
+    _finalNorm = parts.finalNorm;
+    _rotary = parts.rotary;
+    _layers = parts.layers;
+    return ModelReadReport{ModelReadVerdict::Read, ModelImageVerdict::Accepted, 0u};
+}
+
 bool Model::open(TensorArena &arena, const core::u8 *bytes, core::u32 size)
 {
     return copy(arena, bytes, size).verdict == ModelReadVerdict::Read;
@@ -787,6 +943,7 @@ const char *modelReadVerdictName(ModelReadVerdict verdict) noexcept
     case ModelReadVerdict::ArenaExhausted: return "arena_exhausted";
     case ModelReadVerdict::MergesRefused: return "merges_refused";
     case ModelReadVerdict::ChatTokensMissing: return "chat_tokens_missing";
+    case ModelReadVerdict::PartsMisshapen: return "parts_misshapen";
     }
     return "unknown";
 }
